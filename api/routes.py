@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Request
 from heyoo import WhatsApp
 from typing import Dict, Any, Tuple
 
-from core.settings import HEYOO_PHONE_ID, HEYOO_TOKEN
+from core.settings import HEYOO_PHONE_ID, HEYOO_TOKEN, OWNER_PHONE_NUMBER
 from core.logger import LoggerManager
 from models.schemas import MessageRequest
 from services.security import verify_webhook_signature
@@ -201,7 +201,7 @@ class WhatsAppRouter:
             try:
                 self.log.info(f"🧠 Consultando modelo IA para {sender_phone}")
                 self.log.info(f"📤 Enviando respuesta a {sender_phone}")
-                self.log.info(f"📤 Enviando HEYOO PHONE nro: {HEYOO_PHONE_ID}")
+                self.log.info(f"📤 Enviando HEYOO PHONE nro: {OWNER_PHONE_NUMBER}")
                 response_text = await get_llm_response(
                     user_message,
                     conversation_service.get_conversation_history(sender_phone)
