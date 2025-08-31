@@ -1,0 +1,26 @@
+### Test completo de healthcheck avanzado
+POST http://localhost:8000/health/full
+Content-Type: application/json
+X-Hub-Signature-256: test_signature_placeholder
+
+{
+  "entry": [
+    {
+      "changes": [
+        {
+          "value": {
+            "messages": [
+              {
+                "from": "5491123456789",
+                "type": "text",
+                "text": {
+                  "body": "Hola, quiero info"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

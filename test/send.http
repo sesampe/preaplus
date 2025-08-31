@@ -1,0 +1,7 @@
+POST http://localhost:8000/send
+Content-Type: application/json
+
+{
+  "to": "549261111111",
+  "message": "Hola! 🌶️"
+}
