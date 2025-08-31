@@ -201,6 +201,7 @@ class WhatsAppRouter:
             try:
                 self.log.info(f"🧠 Consultando modelo IA para {sender_phone}")
                 self.log.info(f"📤 Enviando respuesta a {sender_phone}")
+                self.log.info(f"📤 Enviando HEYOO PHONE nro: {HEYOO_PHONE_ID}")
                 response_text = await get_llm_response(
                     user_message,
                     conversation_service.get_conversation_history(sender_phone)
