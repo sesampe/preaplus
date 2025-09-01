@@ -284,22 +284,22 @@ class WhatsAppRouter:
             conversation_service.add_to_conversation_history(sender_phone, "user", user_message)
 
             # Try to extract name if not known 
-            if not conversation_service.get_name_from_conversation(sender_phone):
-                #if not saludo:
-                    if not conversation_service.get_name_tried(sender_phone):
-                        self.log.info(f"📝 Nombre no encontrado en conversación para {sender_phone}. Intentando extraer...")
-                        detected_name = await extract_name_with_llm(user_message)
-                        if detected_name:
-                            conversation_service.set_customer_name(sender_phone, detected_name)
-                            conversation_service.add_to_conversation_history(
-                                sender_phone,
-                                "assistant",
-                                f"Guardé tu nombre como {detected_name}"
-                            )
-                            self.log.info(f"📝 Nombre aprendido para {sender_phone}: {detected_name}")
-                        else:
-                            conversation_service.set_name_tried(sender_phone, True)
-                            conversation_service.set_customer_name(sender_phone, None)
+            #if not conversation_service.get_name_from_conversation(sender_phone):
+            #    if not saludo:
+            #        if not conversation_service.get_name_tried(sender_phone):
+            #            self.log.info(f"📝 Nombre no encontrado en conversación para {sender_phone}. Intentando extraer...")
+            #            detected_name = await extract_name_with_llm(user_message)
+            #            if detected_name:
+            #                conversation_service.set_customer_name(sender_phone, detected_name)
+            #                conversation_service.add_to_conversation_history(
+            #                    sender_phone,
+            #                    "assistant",
+            #                    f"Guardé tu nombre como {detected_name}"
+            #                )
+            #                self.log.info(f"📝 Nombre aprendido para {sender_phone}: {detected_name}")
+            #            else:
+            #                conversation_service.set_name_tried(sender_phone, True)
+            #                conversation_service.set_customer_name(sender_phone, None)
 
             # Check for confirmation of order
             #if llm_client.confirmar_pedido(user_message):
