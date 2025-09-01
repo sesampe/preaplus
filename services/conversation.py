@@ -366,6 +366,8 @@ class ConversationEngine:
         # Seguimos conversando con LLM con el historial + datos; útil para dudas post-cierre.
         await self._maybe_llm_reply(user_id, sess)
 
+conversation_service = ConversationEngine()
+
 # -------------------------------------------------------------------
 # Ejemplo de integración (opcional):
 # 
