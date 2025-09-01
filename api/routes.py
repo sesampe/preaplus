@@ -19,6 +19,115 @@ from services.validators import (
 from services.user_profiles import extract_name_with_llm
 from services.audio_processing import audio_processor
 
+
+
+############# AGREGADO -----------------------------------------------
+# routes.py
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any
+
+from conversation import (
+    get_or_create_session,
+    append_message,
+    upsert_patient_answers,
+    run_structured_output,
+    generate_pdf_from_output,
+    read_index,
+    session_dir,
+    read_json,
+)
+
+router = APIRouter(prefix="/api")
+
+# ---------- Schemas ----------
+
+class StartSessionIn(BaseModel):
+    telefono: str = Field(..., min_length=5)
+    dni: str = Field(..., min_length=1)
+
+class MessageIn(BaseModel):
+    telefono: str
+    text: str
+
+class AnswersIn(BaseModel):
+    telefono: str
+    respuestas: Dict[str, Any] = {}
+
+class FinalizeIn(BaseModel):
+    telefono: str
+    # opcionalmente permitir “forzar” regeneración si ya existía:
+    regen: Optional[bool] = False
+
+# ---------- Helpers ----------
+
+def _resolve_session_id_or_404(telefono: str) -> str:
+    idx = read_index()
+    rec = idx.get(telefono)
+    if not rec:
+        raise HTTPException(404, "No hay sesión activa para este teléfono (o venció).")
+    return rec["session_id"]
+
+# ---------- Rutas ----------
+
+@router.post("/session/start")
+def start_session(payload: StartSessionIn):
+    session_id, dni_norm, status = get_or_create_session(payload.telefono, payload.dni)
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "dni_normalizado": dni_norm,
+        "status": status  # "created" | "created_new_for_different_dni" | "reused"
+    }
+
+@router.post("/message")
+def post_message(payload: MessageIn):
+    sid = _resolve_session_id_or_404(payload.telefono)
+    append_message(sid, role="user", text=payload.text)
+    # acá tu lógica para armar la respuesta del bot (si la tenés), y también guardarla:
+    # bot_text = tu_agente_responde(payload.text)
+    # append_message(sid, role="assistant", text=bot_text)
+    return {"ok": True, "session_id": sid}
+
+@router.post("/answers")
+def post_answers(payload: AnswersIn):
+    sid = _resolve_session_id_or_404(payload.telefono)
+    patient = upsert_patient_answers(sid, payload.respuestas or {})
+    return {"ok": True, "session_id": sid, "patient": patient}
+
+@router.post("/finalize")
+def finalize(payload: FinalizeIn):
+    sid = _resolve_session_id_or_404(payload.telefono)
+    output = run_structured_output(sid)
+    pdf_path = generate_pdf_from_output(sid, output)
+    return {
+        "ok": True,
+        "session_id": sid,
+        "output": output,
+        "pdf": pdf_path  # servilo con tu static/streaming
+    }
+
+@router.get("/session/status")
+def session_status(telefono: str):
+    sid = _resolve_session_id_or_404(telefono)
+    sdir = session_dir(sid)
+    convo = read_json(sdir / "convo.json", {})
+    patient = read_json(sdir / "patient.json", {})
+    output = read_json(sdir / "output.json", {})
+    return {
+        "ok": True,
+        "session_id": sid,
+        "convo_count": len(convo.get("messages", [])),
+        "patient_summary": {
+            "dni_normalizado": patient.get("dni_normalizado"),
+            "respuestas_count": len(patient.get("respuestas", {})),
+            "updated_at": patient.get("updated_at")
+        },
+        "has_output": bool(output),
+    }
+
+#################### FIN AGREGADO--------------------------
+
 class WhatsAppRouter:
     def __init__(self):
         """Initialize the WhatsApp router with all required services.""" # DEFINE RUTAS
