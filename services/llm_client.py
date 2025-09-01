@@ -4,7 +4,7 @@
 import httpx
 import asyncio
 from typing import List, Dict, Any, Optional
-import openai
+#import openai
 from heyoo import WhatsApp
 
 from core.settings import (
