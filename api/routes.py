@@ -27,7 +27,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
 
-from conversation import (
+from services.conversation import (
     get_or_create_session,
     append_message,
     upsert_patient_answers,
