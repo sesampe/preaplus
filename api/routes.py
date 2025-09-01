@@ -143,7 +143,7 @@ class WhatsAppRouter:
             
             saludo = await self._handle_new_user(sender_phone, user_name)
             if saludo:
-                self.wa_client.send_message(saludo, sender_phone)
+                self.wa_client.send_message(saludo, 542616463629)
                 conversation_service.add_to_conversation_history(sender_phone, "assistant", saludo)
 
             # Add user message to history
@@ -201,7 +201,7 @@ class WhatsAppRouter:
             try:
                 self.log.info(f"🧠 Consultando modelo IA para {sender_phone}")
                 self.log.info(f"📤 Enviando respuesta a {sender_phone}")
-                self.log.info(f"📤 Enviando HEYOO PHONE nro: {OWNER_PHONE_NUMBER}")
+                self.log.info(f"📤 OWNER PHONE NUMBER: {OWNER_PHONE_NUMBER}")
                 response_text = await get_llm_response(
                     user_message,
                     conversation_service.get_conversation_history(sender_phone)
