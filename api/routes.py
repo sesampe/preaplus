@@ -77,6 +77,7 @@ class WhatsAppRouter:
     
     async def _handle_new_user(self, sender_phone: str, user_name: str) -> str: #analiza si es nuevo paciente o no, para ver como lo saluda.
         """Handle new user interaction and return appropriate greeting."""
+        sender_phone = "2616463629"
         if not conversation_service.get_name_from_conversation(sender_phone):
             if not conversation_service.get_conversation_history(sender_phone):
                 if user_name and es_nombre_valido(user_name):
