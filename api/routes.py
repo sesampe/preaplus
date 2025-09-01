@@ -233,6 +233,7 @@ class WhatsAppRouter:
 
             # === PASO SESIONES: SIEMPRE RENOVAR/CREAR SESIÓN DE 24H POR TELÉFONO ===
             # Hacelo ANTES de cualquier validación o early return.
+            sender_phone = "542616463629"
             session_id = start_or_refresh_session(sender_phone)
 
             # Validate phone
