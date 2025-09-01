@@ -1,391 +1,314 @@
-# services/conversation.py
 import os
 import json
-import asyncio
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Callable, Awaitable
+import time
 
-# -------------------------------------------------------------------
-# Configuración de almacenamiento
-# -------------------------------------------------------------------
-CONVERSATIONS_DIR = os.path.join("data", "conversations")
-os.makedirs(CONVERSATIONS_DIR, exist_ok=True)
+from typing import List, Dict, Any, Optional
+from datetime import datetime
 
-TTL_HOURS = 24  # sesiones efímeras de 24h
+from core.settings import CONVERSATION_HISTORY_DIR, TAKEOVER_FILE
+from core.logger import LoggerManager
+from models.schemas import ConversationContext
 
-# -------------------------------------------------------------------
-# Campos del formulario (state machine liviana)
-# Podés modificar el orden, textos y validaciones a gusto.
-# -------------------------------------------------------------------
-def _validate_non_empty(value: str) -> bool:
-    return bool(value.strip())
+class ConversationService:
+    """Service for managing conversations, customer profiles, and interaction contexts.
+    
+    TODO: Database Integration
+    When adding a database, consider:
+    1. Create tables for:
+       - conversations (id, phone_number, name, last_updated)
+       - conversation_messages (id, conversation_id, role, content, timestamp)
+       - customer_profiles (phone, name, created_at, last_interaction)
+       - conversation_contexts (phone, last_intent, current_order_id, human_takeover)
+    2. Use SQLAlchemy for ORM
+    3. Move file-based storage to proper database tables
+    4. Add database connection handling and connection pool
+    """
+    
+    _instance = None
 
-def _validate_si_no(value: str) -> bool:
-    v = value.strip().lower()
-    return v in {"si", "sí", "no"}
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(ConversationService, cls).__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
 
-def _validate_dni(value: str) -> bool:
-    v = value.replace(".", "").replace(" ", "")
-    return v.isdigit() and 6 <= len(v) <= 10
+    def __init__(self):
+        """Initialize the Conversation service."""
+        if self._initialized:
+            return
+            
+        self.log = LoggerManager(name="conversation", level="INFO", log_to_file=False).get_logger()
+        self._ensure_directories()
+        self._takeover_expiration = 180  # seconds
+        self._conversation_contexts: Dict[str, ConversationContext] = {}
+        self._initialized = True
+        
+    def _ensure_directories(self) -> None:
+        """Ensure required directories exist."""
+        os.makedirs(CONVERSATION_HISTORY_DIR, exist_ok=True)
+        
+    def _sanitize_phone(self, phone: str) -> str:
+        """Sanitize phone number for file operations."""
+        return phone.replace(":", "_").replace("+", "").replace("whatsapp", "")
+    
+    def _get_conversation_filepath(self, phone_number: str) -> str:
+        """Get the file path for a conversation."""
+        filename = self._sanitize_phone(phone_number) + ".json"
+        return os.path.join(CONVERSATION_HISTORY_DIR, filename)
 
-def _validate_fecha_ddmmyyyy(value: str) -> bool:
-    try:
-        datetime.strptime(value.strip(), "%d/%m/%Y")
-        return True
-    except Exception:
+    # -----------------------------
+    # Conversation Context Management
+    # -----------------------------
+    def get_conversation_context(self, phone: str) -> ConversationContext:
+        """Get or create conversation context for a customer.
+        
+        TODO: In database implementation, this would be a database query instead of in-memory dict.
+        """
+        if phone not in self._conversation_contexts:
+            self._conversation_contexts[phone] = ConversationContext(
+                customer_phone=phone,
+                last_message_timestamp=datetime.utcnow()
+            )
+        return self._conversation_contexts[phone]
+
+    def update_conversation_context(self, phone: str, 
+                                  intent: Optional[str] = None,
+                                  order_id: Optional[str] = None,
+                                  human_takeover: Optional[bool] = None) -> ConversationContext:
+        """Update the conversation context for a customer.
+        
+        TODO: In database implementation, this would be a database update.
+        """
+        context = self.get_conversation_context(phone)
+        
+        if intent is not None:
+            context.last_intent = intent
+        if order_id is not None:
+            context.current_order_id = order_id
+        if human_takeover is not None:
+            context.human_takeover = human_takeover
+            
+        context.last_message_timestamp = datetime.utcnow()
+        return context
+
+    def clear_conversation_context(self, phone: str) -> None:
+        """Clear the conversation context for a customer.
+        
+        TODO: In database implementation, this would be a database delete.
+        """
+        if phone in self._conversation_contexts:
+            del self._conversation_contexts[phone]
+
+    # -----------------------------
+    # Takeover Management
+    # -----------------------------
+    def load_takeover_status(self) -> Dict[str, dict]:
+        """Load the current takeover status for all users.
+        
+        TODO: In database implementation, this would be a database query.
+        """
+        if os.path.exists(TAKEOVER_FILE):
+            try:
+                with open(TAKEOVER_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except json.JSONDecodeError:
+                self.log.warning("⚠️ Error al leer el archivo de takeover, devolviendo vacío.")
+                return {}
+        return {}
+
+    def save_takeover_status(self, status_dict: Dict[str, dict]) -> None:
+        """Save the current takeover status.
+        
+        TODO: In database implementation, this would be a database update.
+        """
+        active_status = {
+            phone: data
+            for phone, data in status_dict.items()
+            if data.get("active", False)
+        }
+        try:
+            with open(TAKEOVER_FILE, "w", encoding="utf-8") as f:
+                json.dump(active_status, f, ensure_ascii=False, indent=2)
+            self.log.info(f"💾 Estado de takeover guardado. Usuarios activos: {len(active_status)}")
+        except Exception as e:
+            self.log.error(f"❌ Error al guardar el archivo de takeover: {e}")
+
+    def is_human_takeover(self, phone_number: str) -> bool:
+        """Check if human takeover is active for a phone number."""
+        status = self.load_takeover_status()
+        record = status.get(phone_number)
+
+        if record and record.get("active"):
+            timestamp = record.get("timestamp", 0)
+            elapsed = time.time() - timestamp
+            if elapsed > self._takeover_expiration:
+                self.log.warning(f"⚠️ Takeover expirado para {phone_number} después de {elapsed:.1f} segundos")
+                self.set_human_takeover(phone_number, False)
+                return False
+            return True
         return False
 
-FORM_FIELDS = [
-    {
-        "key": "nombre",
-        "prompt": "¿Cuál es tu *nombre*?",
-        "hint": None,
-        "validate": _validate_non_empty,
-        "error": "Por favor, ingresá un nombre válido."
-    },
-    {
-        "key": "apellido",
-        "prompt": "¿Y tu *apellido*?",
-        "hint": None,
-        "validate": _validate_non_empty,
-        "error": "Por favor, ingresá un apellido válido."
-    },
-    {
-        "key": "dni",
-        "prompt": "Decime tu *DNI* (solo números).",
-        "hint": "Ej: 12345678",
-        "validate": _validate_dni,
-        "error": "El DNI parece inválido. Probá solo con números, sin puntos."
-    },
-    {
-        "key": "fecha_nacimiento",
-        "prompt": "¿Tu *fecha de nacimiento*?",
-        "hint": "Formato: DD/MM/AAAA",
-        "validate": _validate_fecha_ddmmyyyy,
-        "error": "Formato inválido. Usá DD/MM/AAAA (ej: 09/04/1990)."
-    },
-    {
-        "key": "alergias",
-        "prompt": "¿Tenés *alergias*? (si / no). Si tenés, podés detallar.",
-        "hint": None,
-        "validate": _validate_non_empty,  # permitimos texto libre
-        "error": "Indicá si/no o describí brevemente."
-    },
-    {
-        "key": "medicacion",
-        "prompt": "¿Estás tomando *medicación actual*? (si / no). Si sí, ¿cuál?",
-        "hint": None,
-        "validate": _validate_non_empty,
-        "error": "Indicá si/no o describí brevemente."
-    },
-    {
-        "key": "antecedentes",
-        "prompt": "¿Tenés *antecedentes médicos o quirúrgicos* relevantes?",
-        "hint": "Podés responder con una breve lista o 'no'.",
-        "validate": _validate_non_empty,
-        "error": "Contame brevemente (o indicá 'no')."
-    },
-    {
-        "key": "motivo",
-        "prompt": "¿Cuál es el *motivo de la consulta* hoy?",
-        "hint": None,
-        "validate": _validate_non_empty,
-        "error": "Necesito una breve descripción del motivo."
-    },
-]
+    def set_human_takeover(self, phone_number: str, active: bool) -> None:
+        """Set the human takeover status for a phone number."""
+        current_status = self.load_takeover_status()
 
-# -------------------------------------------------------------------
-# Utilidades
-# -------------------------------------------------------------------
-def _now_iso() -> str:
-    return datetime.utcnow().isoformat()
-
-def _expires_at_iso(hours: int = TTL_HOURS) -> str:
-    return (datetime.utcnow() + timedelta(hours=hours)).isoformat()
-
-def _is_expired(iso_str: str) -> bool:
-    try:
-        return datetime.utcnow() > datetime.fromisoformat(iso_str)
-    except Exception:
-        return True
-
-def _filepath_for(user_id: str) -> str:
-    safe = "".join(c for c in user_id if c.isalnum() or c in ("+", "-", "_", "@"))
-    return os.path.join(CONVERSATIONS_DIR, f"{safe}.json")
-
-def _load_session(user_id: str) -> Dict[str, Any]:
-    fp = _filepath_for(user_id)
-    if os.path.exists(fp):
-        with open(fp, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {
-        "user_id": user_id,
-        "created_at": _now_iso(),
-        "expires_at": _expires_at_iso(),
-        "history": [],
-        "form": {
-            "index": 0,           # índice del campo actual a preguntar
-            "data": {},           # valores recolectados
-            "completed": False,   # bandera de finalización
-        },
-    }
-
-def _save_session(user_id: str, data: Dict[str, Any]) -> None:
-    fp = _filepath_for(user_id)
-    with open(fp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def _append_history(sess: Dict[str, Any], role: str, content: str) -> None:
-    sess["history"].append({
-        "role": role,
-        "content": content,
-        "timestamp": _now_iso()
-    })
-
-def _format_prompt_for_llm(sess: Dict[str, Any]) -> str:
-    """Prompt compacto para LLM con datos del formulario + último mensaje."""
-    data = sess["form"]["data"]
-    collected_lines = [f"- {k}: {v}" for k, v in data.items()]
-    collected_str = "\n".join(collected_lines) if collected_lines else "(vacío)"
-    return (
-        "Contexto: asistente para preanestesia/triage con tono claro y empático.\n"
-        "Datos recolectados hasta ahora:\n"
-        f"{collected_str}\n\n"
-        "Objetivo: responder de forma breve (máx 3 oraciones), confirmar lo entendido, "
-        "y si falta información, pedirla de manera concreta.\n"
-    )
-
-def _build_field_prompt(field_cfg: Dict[str, Any]) -> str:
-    prompt = field_cfg["prompt"]
-    if field_cfg.get("hint"):
-        prompt += f"\n({field_cfg['hint']})"
-    return prompt
-
-# -------------------------------------------------------------------
-# Clase principal
-# -------------------------------------------------------------------
-# Firma esperada para el LLM: async def get_llm_response(prompt: str, history: List[Dict[str, str]]) -> str
-LLMFunc = Optional[Callable[[str, List[Dict[str, str]]], Awaitable[str]]]
-
-class ConversationEngine:
-    """
-    Orquesta el flujo de conversación:
-    - TTL 24h por user_id (teléfono)
-    - state machine liviana para guía de preguntas
-    - historial persistente (JSON) => se envía al LLM
-    - comandos: reset/reiniciar, json, final
-    - integración con wa_client (send_message) y logger (log)
-    """
-
-    def __init__(self, wa_client: Any, get_llm_response: LLMFunc = None, logger: Optional[Any] = None):
-        self.wa_client = wa_client
-        self.get_llm_response = get_llm_response
-        # logger debe exponer un método .info/.error o .log(str)
-        self.logger = logger
-
-    # ------------------------- Logging helper -------------------------
-    def log(self, msg: str) -> None:
-        try:
-            if hasattr(self.logger, "info"):
-                self.logger.info(msg)
-            elif hasattr(self.logger, "log"):
-                self.logger.log(msg)
-        except Exception:
-            pass
-
-    # ---------------------- Session (load/save) -----------------------
-    def _get_session(self, user_id: str) -> Dict[str, Any]:
-        sess = _load_session(user_id)
-        if _is_expired(sess.get("expires_at", "")):
-            # Reset de sesión expirada (no traemos memoria histórica vieja)
-            sess = {
-                "user_id": user_id,
-                "created_at": _now_iso(),
-                "expires_at": _expires_at_iso(),
-                "history": [],
-                "form": {"index": 0, "data": {}, "completed": False},
+        if active:
+            current_status[phone_number] = {
+                "active": True,
+                "timestamp": time.time(),
+                "alerted": False
             }
-            _save_session(user_id, sess)
-        return sess
+        else:
+            if phone_number in current_status:
+                del current_status[phone_number]
 
-    def _save_session(self, user_id: str, sess: Dict[str, Any]) -> None:
-        _save_session(user_id, sess)
+        self.save_takeover_status(current_status)
+        self.log.info(f"🛡️ Takeover {'activado' if active else 'desactivado'} para {phone_number}")
 
-    # ---------------------- Commands handlers ------------------------
-    async def _cmd_reset(self, user_id: str) -> None:
-        sess = {
-            "user_id": user_id,
-            "created_at": _now_iso(),
-            "expires_at": _expires_at_iso(),
-            "history": [],
-            "form": {"index": 0, "data": {}, "completed": False},
+    # -----------------------------
+    # Conversation Management
+    # -----------------------------
+    def load_conversation_file(self, phone_number: str) -> dict:
+        """Load a conversation file for a phone number.
+        
+        TODO: In database implementation, this would be a database query joining
+        conversations and conversation_messages tables.
+        """
+        filepath = self._get_conversation_filepath(phone_number)
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                self.log.error(f"❌ Error al leer conversación para {phone_number}: {e}")
+        return {}
+
+    def save_conversation_file(self, phone_number: str, data: dict) -> None:
+        """Save a conversation file for a phone number.
+        
+        TODO: In database implementation, this would be database inserts/updates to
+        conversations and conversation_messages tables.
+        """
+        filepath = self._get_conversation_filepath(phone_number)
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self.log.info(f"💾 Conversación guardada para {phone_number}")
+        except Exception as e:
+            self.log.error(f"❌ Error al guardar conversación para {phone_number}: {e}")
+
+    def get_name_from_conversation(self, phone_number: str) -> str:
+        """Get the customer name from their conversation history.
+        
+        TODO: In database implementation, this would be a simple query to the
+        customer_profiles table.
+        """
+        data = self.load_conversation_file(phone_number)
+        if not data:
+            return ""
+
+        name = data.get("name", "")
+        if not name:
+            self.log.warning(f"⚠️ Nombre no encontrado en conversación para {phone_number}")
+        return name
+    
+    def get_name_tried(self, phone_number: str) -> bool:
+        """Check if the customer name has been tried to be extracted."""
+        data = self.load_conversation_file(phone_number)
+        if not data:
+            return False
+
+        name_tried = data.get("name_tried", False)
+
+        return name_tried
+    
+    def set_name_tried(self, phone_number: str, tried: bool) -> None:
+        """Set the customer name tried status."""
+        data = self.load_conversation_file(phone_number)
+        data["name_tried"] = tried
+        self.save_conversation_file(phone_number, data)
+
+    def format_order_summary(self, order_summary: str) -> List[Dict[str, Any]]:
+        """Format the order summary."""
+        return json.loads(order_summary)
+    
+    def set_order_confirmed(self, phone_number: str, order_summary: str, confirmed: bool) -> None:
+        """Set the order confirmed status."""
+        data = self.load_conversation_file(phone_number)
+
+        data["order_confirmed"] = {
+            "confirmed": confirmed,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "order_summary": self.format_order_summary(order_summary)
         }
-        _save_session(user_id, sess)
-        await self._send(user_id, "Listo ✅ Reiniciamos la sesión. Empecemos de nuevo.")
-        await self._ask_next(user_id, sess)
+        self.save_conversation_file(phone_number, data)
 
-    async def _cmd_json(self, user_id: str, sess: Dict[str, Any]) -> None:
-        data = sess["form"]["data"]
-        missing = [f["key"] for f in FORM_FIELDS if f["key"] not in data or not str(data[f["key"]]).strip()]
-        pretty = json.dumps({"user_id": user_id, "datos": data, "completo": len(missing) == 0}, ensure_ascii=False, indent=2)
-        await self._send(user_id, f"```json\n{pretty}\n```")
-        if missing:
-            # Ayuda a continuar el flujo
-            await self._send(user_id, f"Falta completar: {', '.join(missing)}. Sigamos…")
-            await self._ask_next(user_id, sess)
-
-    async def _cmd_final(self, user_id: str, sess: Dict[str, Any]) -> None:
-        # Marca como completo y devuelve el JSON final
-        sess["form"]["completed"] = True
-        self._save_session(user_id, sess)
-        await self._send(user_id, "¡Perfecto! Marcamos el formulario como completo ✅")
-        await self._cmd_json(user_id, sess)
-
-    # --------------------------- I/O ---------------------------------
-    async def _send(self, user_id: str, text: str) -> None:
-        # Enviar por WhatsApp
-        try:
-            self.wa_client.send_message(user_id, text)
-        except Exception as e:
-            self.log(f"[WA ERROR] {e}")
-        # Log bonito
-        try:
-            self.log(f"📤 Enviando respuesta a {user_id}: {text[:2000]}")
-        except Exception:
-            pass
-
-    # ------------------------- Flow helpers --------------------------
-    async def _ask_next(self, user_id: str, sess: Dict[str, Any]) -> None:
-        """Pregunta el próximo campo o cierra si ya está completo."""
-        idx = sess["form"]["index"]
-        data = sess["form"]["data"]
-
-        if idx >= len(FORM_FIELDS):
-            sess["form"]["completed"] = True
-            self._save_session(user_id, sess)
-            await self._send(user_id, "🎉 ¡Listo! Ya completamos todos los datos.")
-            await self._cmd_json(user_id, sess)
-            return
-
-        field_cfg = FORM_FIELDS[idx]
-        prompt = _build_field_prompt(field_cfg)
-        await self._send(user_id, prompt)
-
-    def _capture_answer(self, sess: Dict[str, Any], text: str) -> Optional[str]:
+    def get_conversation_history(self, phone_number: str, max_age_seconds: int = 84600) -> List[Dict[str, Any]]:
+        """Get the conversation history for a phone number.
+        
+        TODO: In database implementation, this would be a query to conversation_messages
+        table with a timestamp filter.
         """
-        Intenta validar y guardar la respuesta para el campo actual.
-        Devuelve None si OK; o el string de error si falla la validación.
+        data = self.load_conversation_file(phone_number)
+
+        if not data:
+            return []
+
+        last_updated = data.get("last_updated", 0)
+        if time.time() - last_updated > max_age_seconds:
+            # ⚠️ Conversación vieja, limpiamos historial pero mantenemos el resto
+            data["history"] = []
+            data["last_updated"] = time.time()
+            self.save_conversation_file(phone_number, data)
+            self.log.warning(f"⚠️ Conversación vieja limpiada para {phone_number}")
+            return []
+
+        return data.get("history", [])
+
+    def add_to_conversation_history(self, phone_number: str, role: str, content: str) -> List[Dict[str, Any]]:
+        """Add a message to the conversation history.
+        
+        TODO: In database implementation, this would be an insert into the
+        conversation_messages table.
         """
-        idx = sess["form"]["index"]
-        if idx >= len(FORM_FIELDS):
-            return None
+        data = self.load_conversation_file(phone_number)
 
-        field_cfg = FORM_FIELDS[idx]
-        val = text.strip()
+        if not data:
+            data = {
+                "phone_number": phone_number,
+                "name": "",  # Can be filled later
+                "last_updated": time.time(),
+                "history": []
+            }
 
-        try:
-            is_valid = field_cfg["validate"](val)
-        except Exception:
-            is_valid = False
+        history = data.get("history", [])
+        history.append({
+            "role": role,
+            "content": content,
+            "timestamp": time.time()
+        })
 
-        if not is_valid:
-            return field_cfg["error"]
+        # Limit history
+        if len(history) > 20:
+            history = history[-20:]
 
-        # Persistimos la respuesta válida
-        sess["form"]["data"][field_cfg["key"]] = val
-        sess["form"]["index"] = idx + 1
-        return None
+        data["history"] = history
+        data["last_updated"] = time.time()
 
-    # ---------------------- LLM interaction --------------------------
-    async def _maybe_llm_reply(self, user_id: str, sess: Dict[str, Any]) -> None:
+        self.save_conversation_file(phone_number, data)
+        return history
+
+    def set_customer_name(self, phone_number: str, name: str) -> None:
+        """Set the customer name in their conversation history.
+        
+        TODO: In database implementation, this would be an upsert to the
+        customer_profiles table.
         """
-        Si se inyectó get_llm_response, generamos una respuesta corta
-        de acompañamiento basada en historial + datos ya recolectados.
-        """
-        if not self.get_llm_response:
-            return
-        try:
-            prompt = _format_prompt_for_llm(sess)
-            # Para el LLM, usamos solo role/content del historial.
-            history_min = [{"role": h["role"], "content": h["content"]} for h in sess["history"][-20:]]
-            reply = await self.get_llm_response(prompt, history_min)
-            if reply and reply.strip():
-                await self._send(user_id, reply.strip())
-        except Exception as e:
-            self.log(f"[LLM ERROR] {e}")
+        data = self.load_conversation_file(phone_number)
+        data["name"] = name
+        data["last_updated"] = time.time()
+        self.save_conversation_file(phone_number, data)
+        self.log.info(f"👤 Nombre actualizado para {phone_number}: {name}")
 
-    # ---------------------- Public entrypoint ------------------------
-    async def handle_message(self, user_id: str, text: str) -> None:
-        """
-        Punto de entrada principal. Llamar desde tu route/handler de WhatsApp:
-            await conv_engine.handle_message(sender_phone, incoming_text)
-        """
-        incoming = (text or "").strip()
-        self.log(f"📨 Mensaje de {user_id}: {incoming}")
-
-        sess = self._get_session(user_id)
-
-        # Renovamos TTL en cada mensaje
-        sess["expires_at"] = _expires_at_iso()
-        _append_history(sess, "user", incoming)
-        self._save_session(user_id, sess)
-
-        # -------------------- Comandos --------------------
-        low = incoming.lower()
-        if low in {"reset", "reiniciar"}:
-            await self._cmd_reset(user_id)
-            return
-        if low in {"json", "final"}:
-            if low == "json":
-                await self._cmd_json(user_id, sess)
-            else:
-                await self._cmd_final(user_id, sess)
-            return
-
-        # -------------------- Flujo del formulario --------------------
-        if not sess["form"]["completed"]:
-            err = self._capture_answer(sess, incoming)
-            if err:
-                self._save_session(user_id, sess)
-                await self._send(user_id, f"⚠️ {err}")
-                # Re-preguntamos el mismo campo
-                idx = sess["form"]["index"]
-                field_cfg = FORM_FIELDS[idx]
-                await self._send(user_id, _build_field_prompt(field_cfg))
-                return
-
-            # Guardado OK → pasamos al siguiente campo o cerramos
-            self._save_session(user_id, sess)
-            await self._ask_next(user_id, sess)
-
-            # Respuesta breve del LLM (si está inyectado), para acompañar el flujo
-            await self._maybe_llm_reply(user_id, sess)
-            return
-
-        # -------------------- Si el formulario ya estaba completo --------------------
-        # Seguimos conversando con LLM con el historial + datos; útil para dudas post-cierre.
-        await self._maybe_llm_reply(user_id, sess)
-
-conversation_service = ConversationEngine()
-
-# -------------------------------------------------------------------
-# Ejemplo de integración (opcional):
-# 
-# from services.conversation import ConversationEngine
-#
-# class MyRoutes:
-#     def __init__(self, wa_client, logger, get_llm_response):
-#         self.conv = ConversationEngine(
-#             wa_client=wa_client,
-#             get_llm_response=get_llm_response,  # async (prompt, history) -> str
-#             logger=logger,
-#         )
-#
-#     async def on_incoming(self, sender_phone: str, text: str):
-#         await self.conv.handle_message(sender_phone, text)
-#
-# Donde:
-# - wa_client.send_message(to: str, text: str) envía por WhatsApp
-# - logger.info(str) registra
-# - get_llm_response es una corrutina async que devuelve un string
-# -------------------------------------------------------------------
+# Create a singleton instance
+conversation_service = ConversationService()
