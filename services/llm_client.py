@@ -1,6 +1,10 @@
+#ESTE ES EL PUENTE ENTRE BOT Y LOS MODELOS DE LENGUAJE
+#MANEJA ESAS COMUNICACIONES, CONTROLA ERRORES, ETC.
+
 import httpx
 import asyncio
 from typing import List, Dict, Any, Optional
+import openai
 from heyoo import WhatsApp
 
 from core.settings import (
@@ -21,7 +25,7 @@ class LLMClient:
 
     _instance = None
 
-    def __new__(cls):
+    def __new__(cls): #CREA SINGLETON, PARA QUE SE MANEJE SIEMPRE CON LA MISMA CONFIGURACION.
         """Implementación de singleton."""
         if cls._instance is None:
             cls._instance = super(LLMClient, cls).__new__(cls)
@@ -33,12 +37,14 @@ class LLMClient:
         if self._initialized:
             return
 
-        self.log = LoggerManager(name="llm_client", level="INFO", log_to_file=False).get_logger()
+        self.log = LoggerManager(name="llm_client", level="INFO", log_to_file=False).get_logger() 
+        #CREA UN "CUADERNO" DONDE ANOTAR LO QUE HACE EL LLM CON LOS SIGUIENTES DATOS:
         self.wa_client = WhatsApp(token=HEYOO_TOKEN, phone_number_id=HEYOO_PHONE_ID)
         self.http_timeout = 30.0
         self.max_retries = 5
         self._initialized = True
 
+    # ABRE UN "TELEFONO" Y ENVIA EL JSON + SE FIJA SI HAY ERROR. TRADUCE LO QUE RESPONDE EL LLMClient A FORMATO JSON.
     async def _make_http_request(self, url: str, headers: Dict[str, str], json_data: Dict[str, Any]) -> Dict[str, Any]:
         """Hace un POST HTTP con manejo de timeout y devuelve el JSON."""
         async with httpx.AsyncClient(timeout=self.http_timeout) as client:
@@ -202,6 +208,10 @@ class LLMClient:
     def confirmar_pedido(message: str) -> bool:
         """(Compat) Antes confirmaba pedidos. Ahora siempre False para no disparar lógica de ventas."""
         return False
+    
+    ############################## HAY QUE ARMAR EL PROMPT PARA QUE ME ARROJE DIRECTAMENTE UN JSON #################################
+    def get_info()->json:
+        client.completion(mensajes, PREANESTHESIA_SCHEMA).parse
 
     async def notify_owner(self, customer_phone: str, name: str, summary: str, order_summary: str = None) -> str:
         """Notifica al owner sobre una conversación que requiere atención (sin info de 'pedido')."""

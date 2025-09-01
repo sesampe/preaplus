@@ -29,20 +29,20 @@ class WhatsAppRouter:
         # Register routes
         self._register_routes()
         
-    def _register_routes(self):
+    def _register_routes(self): #define endpoints que te manda whatsapp a la app
         """Register all routes with the router."""
         self.router.get("/webhook")(self.verify_webhook)
         self.router.post("/webhook")(self.heyoo_webhook)
         self.router.post("/send")(self.send_manual_message)
         
-    async def verify_webhook(self, request: Request) -> Any:
+    async def verify_webhook(self, request: Request) -> Any: #verifica que webhook este OK
         """Verify webhook endpoint for WhatsApp API setup."""
         params = request.query_params
         if params.get("hub.verify_token") == "HolaAI":
             return int(params.get("hub.challenge"))
         return "Token inválido", 403
     
-    async def _handle_status_message(self, value: Dict[str, Any]) -> Tuple[Dict[str, str], int]:
+    async def _handle_status_message(self, value: Dict[str, Any]) -> Tuple[Dict[str, str], int]: #checkea que mensaje que envias llegue OK.
         """Handle status message from WhatsApp."""
         status_entry = value["statuses"][0]
         status = status_entry.get("status")
@@ -58,7 +58,7 @@ class WhatsAppRouter:
 
         return {"status": "status_logged"}, 200
     
-    async def _process_message(self, message_entry: Dict[str, Any], sender_phone: str) -> str:
+    async def _process_message(self, message_entry: Dict[str, Any], sender_phone: str) -> str: #ANALIZA SI ES UN MENSAJE, REACCION O QUE TIPO)
         """Process incoming message and return the message content."""
         if message_entry.get("type") != "text":
             if message_entry.get("type") == "audio":
@@ -75,7 +75,7 @@ class WhatsAppRouter:
                 return "unsupported"
         return message_entry["text"]["body"]
     
-    async def _handle_new_user(self, sender_phone: str, user_name: str) -> str:
+    async def _handle_new_user(self, sender_phone: str, user_name: str) -> str: #analiza si es nuevo paciente o no, para ver como lo saluda.
         """Handle new user interaction and return appropriate greeting."""
         if not conversation_service.get_name_from_conversation(sender_phone):
             if not conversation_service.get_conversation_history(sender_phone):
@@ -88,7 +88,7 @@ class WhatsAppRouter:
 
     async def heyoo_webhook(self, request: Request) -> Tuple[Dict[str, str], int]:
         """Handle incoming webhook from WhatsApp."""
-        # Verify signature
+        # Verify signature (se fija si la firma de quien manda la solicitud es la permitida -Meta-)
         header_signature = request.headers.get("X-Hub-Signature-256") or request.headers.get("X-Hub-Signature")
         body = await request.body()
 
@@ -100,7 +100,7 @@ class WhatsAppRouter:
             data = await request.json()
             value = data["entry"][0]["changes"][0]["value"]
 
-            # Handle status messages
+            # Handle status messages (SE FIJA SI ES UN ESTADO DE UN MENSAJE, O UN MENSAJE.)
             if "statuses" in value:
                 return await self._handle_status_message(value)
 
@@ -109,7 +109,7 @@ class WhatsAppRouter:
                 self.log.warning("⚠️ Webhook sin 'messages' ni 'statuses'. Ignorando.")
                 return {"status": "ignored"}, 200
 
-            # Process message
+            # Process message (EXTRAE DATOS DEL MENSAJE: NUMERO Y MENSAJE --> PARA HACER FUTURAS VALIDACIONES)
             message_entry = value["messages"][0]
             sender_phone = message_entry["from"]
 
@@ -118,7 +118,7 @@ class WhatsAppRouter:
             if not validation_country["valid"]:
                 return {"status": validation_country["status"]}, 200
 
-            # Process message content
+            # Process message content (DECIDE QUE HACER SEGN TIPO DE MENSAJE QUE ARROJO _PROCESS_MESSAGE)
             user_message = await self._process_message(message_entry, sender_phone)
             if user_message in ["reaction", "unsupported"]:
                 return {"status": f"{user_message}_received"}, 200
@@ -132,12 +132,12 @@ class WhatsAppRouter:
                 )
                 return {"status": "prompt_injection_blocked"}, 200
 
-            # Validate message content
+            # Validate message content 
             validation_content = validate_message_content(user_message, sender_phone, self.wa_client)
             if not validation_content["valid"]:
                 return {"status": validation_content["status"]}, 200
 
-            # Get user profile and handle new user
+            # Get user profile and handle new user (MIRA DATOS A VER SI SE PUEDE SACAR UN NOMBRE)
             profile_info = value.get("contacts", [{}])[0].get("profile", {})
             user_name = profile_info.get("name")
             
@@ -146,10 +146,10 @@ class WhatsAppRouter:
                 self.wa_client.send_message(saludo, 542616463629)
                 conversation_service.add_to_conversation_history(sender_phone, "assistant", saludo)
 
-            # Add user message to history
+            # Add user message to history (AGREGA EL PACIENTE AL HISTORIAL)
             conversation_service.add_to_conversation_history(sender_phone, "user", user_message)
 
-            # Try to extract name if not known
+            # Try to extract name if not known 
             if not conversation_service.get_name_from_conversation(sender_phone):
                 if not saludo:
                     if not conversation_service.get_name_tried(sender_phone):
@@ -174,7 +174,7 @@ class WhatsAppRouter:
             #        "¡Gracias! Tu pedido ha sido confirmado. Nos pondremos en contacto contigo pronto.",
             #        sender_phone
             #    )
-            #    order_summary = await llm_client.get_order_summary(conversation_service.get_conversation_history(sender_phone))
+            #   order_summary = await llm_client.get_order_summary(conversation_service.get_conversation_history(sender_phone))
             #    self.log.debug(f"📝 Resumen del pedido: {order_summary}")
             #    summary = await llm_client.get_summary_from_conversation_history(conversation_service.get_conversation_history(sender_phone))
             #    name = conversation_service.get_name_from_conversation(sender_phone)
@@ -197,26 +197,26 @@ class WhatsAppRouter:
             #    conversation_service.add_to_conversation_history(sender_phone, "assistant", response_text)
             #    return {"status": "escalated"}, 200
 
-            # Get AI response
+            # Get AI response 
             try:
                 self.log.info(f"🧠 Consultando modelo IA para {sender_phone}")
                 self.log.info(f"📤 Enviando respuesta a {sender_phone}")
                 self.log.info(f"📤 OWNER PHONE NUMBER: {OWNER_PHONE_NUMBER}")
-                response_text = await get_llm_response(
-                    user_message,
-                    conversation_service.get_conversation_history(sender_phone)
+                response_text = await get_llm_response(      #(ACA LE MANDA LO QUE SE VIENE HABLANDO A LA IA)
+                    user_message,                           #literal lo que me puso el paciente
+                    conversation_service.get_conversation_history(sender_phone)  #y lo que se viene hablando
                 )
             except Exception as e:
                 self.log.error(f"⚠️ Error consultando IA: {e}")
                 response_text = "Estamos experimentando dificultades. ¿Querés que te conecte con una persona?"
 
-            # Send response
+            # Send response #(ANOTA EN EL HISTORIAL LO QUE EL BOT LE RESPONDIO Y LE MANDA EL MENSAJE AL PACIENTE)
             conversation_service.add_to_conversation_history(sender_phone, "assistant", response_text)
             self.wa_client.send_message(response_text, sender_phone)
 
             return {"status": "responded"}, 200
 
-        except Exception as e:
+        except Exception as e: # (SI HUBO CUALQUIER ERROR EN ESTE def, DA UN LOG PARA QUE LO VEAMOS Y AVISA A WHATSAPP ASI NO SIGUE AVISANDO)
             self.log.error(f"⚠️ Error al parsear mensaje o status: {e}")
             try:
                 self.log.error(f"Payload recibido: {data['entry'][0]['changes'][0]['value']}")
@@ -224,7 +224,7 @@ class WhatsAppRouter:
                 self.log.error("No se pudo imprimir el valor del webhook recibido.")
             return {"status": "ignored"}, 200
 
-    async def send_manual_message(self, request: MessageRequest) -> Dict[str, Any]:
+    async def send_manual_message(self, request: MessageRequest) -> Dict[str, Any]: #ESTE ES UN def POR SI QUEREMOS MANDAR UN MENSAJE MANUALMENTE DESDE LA API
         """Send a manual message to a WhatsApp user."""
         try:
             self.wa_client.send_message(request.message, request.to)
