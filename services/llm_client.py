@@ -210,8 +210,8 @@ class LLMClient:
         return False
     
     ############################## HAY QUE ARMAR EL PROMPT PARA QUE ME ARROJE DIRECTAMENTE UN JSON #################################
-    def get_info()->json:
-        client.completion(mensajes, PREANESTHESIA_SCHEMA).parse
+    #def get_info()->json:
+    #    client.completion(mensajes, PREANESTHESIA_SCHEMA).parse
 
     async def notify_owner(self, customer_phone: str, name: str, summary: str, order_summary: str = None) -> str:
         """Notifica al owner sobre una conversación que requiere atención (sin info de 'pedido')."""
