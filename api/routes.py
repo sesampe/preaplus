@@ -21,7 +21,7 @@ from services.audio_processing import audio_processor
 
 class WhatsAppRouter:
     def __init__(self):
-        """Initialize the WhatsApp router with all required services."""
+        """Initialize the WhatsApp router with all required services.""" # DEFINE RUTAS
         self.router = APIRouter()
         self.wa_client = WhatsApp(token=HEYOO_TOKEN, phone_number_id=HEYOO_PHONE_ID)
         self.log = LoggerManager(name="routes", level="INFO", log_to_file=False).get_logger()
@@ -42,7 +42,7 @@ class WhatsAppRouter:
             return int(params.get("hub.challenge"))
         return "Token inválido", 403
     
-    async def _handle_status_message(self, value: Dict[str, Any]) -> Tuple[Dict[str, str], int]: #checkea que mensaje que envias llegue OK.
+    async def _handle_status_message(self, value: Dict[str, Any]) -> Tuple[Dict[str, str], int]: #checkea que mensaje que envias llegue, si se lee,etc
         """Handle status message from WhatsApp."""
         status_entry = value["statuses"][0]
         status = status_entry.get("status")
@@ -58,7 +58,7 @@ class WhatsAppRouter:
 
         return {"status": "status_logged"}, 200
     
-    async def _process_message(self, message_entry: Dict[str, Any], sender_phone: str) -> str: #ANALIZA SI ES UN MENSAJE, REACCION O QUE TIPO)
+    async def _process_message(self, message_entry: Dict[str, Any], sender_phone: str) -> str: #ANALIZA QUE TIPO DE MENSAJE ES
         """Process incoming message and return the message content."""
         if message_entry.get("type") != "text":
             if message_entry.get("type") == "audio":
@@ -143,6 +143,7 @@ class WhatsAppRouter:
             
             saludo = await self._handle_new_user(sender_phone, user_name)
             if saludo:
+                sender_phone = '542616463629'
                 self.wa_client.send_message(saludo, 542616463629)
                 conversation_service.add_to_conversation_history(sender_phone, "assistant", saludo)
 
