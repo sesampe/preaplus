@@ -285,7 +285,7 @@ class WhatsAppRouter:
 
             # Try to extract name if not known 
             if not conversation_service.get_name_from_conversation(sender_phone):
-                if not saludo:
+                #if not saludo:
                     if not conversation_service.get_name_tried(sender_phone):
                         self.log.info(f"📝 Nombre no encontrado en conversación para {sender_phone}. Intentando extraer...")
                         detected_name = await extract_name_with_llm(user_message)
