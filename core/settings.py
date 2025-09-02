@@ -1,4 +1,3 @@
-# /app/core/settings.py
 from __future__ import annotations
 import os
 from pathlib import Path
@@ -21,6 +20,13 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # si lo usas
 HEYOO_TOKEN = os.getenv("HEYOO_TOKEN", "")
 ENV = os.getenv("ENV", "production")
 
+# 🔐 Webhook / Meta
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
+APP_SECRET = os.getenv("APP_SECRET", "")  # App Secret de Meta/WhatsApp para firmar webhooks
+HEYOO_PHONE_ID = os.getenv("HEYOO_PHONE_ID", "")
+OWNER_PHONE_NUMBER = os.getenv("OWNER_PHONE_NUMBER", "")
+SYSTEM_PROMPT_FILE = os.getenv("SYSTEM_PROMPT_FILE", str(DATA_DIR / "system_prompt.md"))
+
 # ---------- Google Drive / Productos ----------
 SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE", str(DATA_DIR / "gcp-sa.json"))
 PRODUCT_LIST_FILE_ID = os.getenv("PRODUCT_LIST_FILE_ID", "")
@@ -40,11 +46,12 @@ class _Settings:
     HEYOO_TOKEN: str = HEYOO_TOKEN
     ENV: str = ENV
 
-    # Drive/Productos
-    SERVICE_ACCOUNT_FILE: str = SERVICE_ACCOUNT_FILE
-    PRODUCT_LIST_FILE_ID: str = PRODUCT_LIST_FILE_ID
-    CATALOG_PDF_LINK: str = CATALOG_PDF_LINK
-    PRODUCTS_CACHE_FILE: str = PRODUCTS_CACHE_FILE
+    # Webhook / Meta
+    VERIFY_TOKEN: str = VERIFY_TOKEN
+    APP_SECRET: str = APP_SECRET
+    HEYOO_PHONE_ID: str = HEYOO_PHONE_ID
+    OWNER_PHONE_NUMBER: str = OWNER_PHONE_NUMBER
+    SYSTEM_PROMPT_FILE: str = SYSTEM_PROMPT_FILE
 
     # ---------- LLM ----------
     LLM_API_BASE: str = os.getenv("LLM_API_BASE", "https://api.openai.com/v1")
@@ -72,6 +79,13 @@ __all__ = [
     "HEYOO_TOKEN",
     "ENV",
     "settings",
+    # Webhook / Meta
+    "VERIFY_TOKEN",
+    "APP_SECRET",
+    "HEYOO_PHONE_ID",
+    "OWNER_PHONE_NUMBER",
+    "SYSTEM_PROMPT_FILE",
+    # Drive / Productos
     "SERVICE_ACCOUNT_FILE",
     "PRODUCT_LIST_FILE_ID",
     "CATALOG_PDF_LINK",
