@@ -94,9 +94,11 @@ def _now_date() -> date:
 
 def fill_from_text_modular(state: ConversationState, module_idx: int, text: str) -> Dict[str, Any]:
     """Devuelve un patch dict (serializable) con lo que pudo extraer localmente.
-       Antibucle: si no se extrae nada, incrementa contador; si se extrae, resetea."""
+       Antibucle: si no se extrae nada, incrementa contador; si se extrae algo que llena requeridos, resetea."""
     patch: Dict[str, Any] = {}
     name = MODULES[module_idx]["name"]
+
+    missing_before = set(_missing_required(state, module_idx))
 
     if name == "DNI":
         dni = parse_dni(text)
@@ -119,14 +121,20 @@ def fill_from_text_modular(state: ConversationState, module_idx: int, text: str)
         fnac = parse_fecha(t)
         edad = edad_from_fecha_nacimiento(fnac) if fnac else None
 
+        something = False
         if nombre:
             _set(patch, "ficha.datos.nombre_completo", nombre)
+            something = True
         if fnac:
             _set(patch, "ficha.datos.fecha_nacimiento", fnac.isoformat())
+            something = True
         if edad is not None:
             _set(patch, "ficha.datos.edad", edad)
-        # siempre registramos fecha de evaluación
-        _set(patch, "ficha.datos.fecha_evaluacion", _now_date().isoformat())
+            something = True
+
+        # sólo si extrajimos algo del bloque DATOS, seteamos fecha_evaluacion
+        if something:
+            _set(patch, "ficha.datos.fecha_evaluacion", _now_date().isoformat())
 
     elif name == "ANTROPOMETRIA":
         peso = parse_peso_kg(text)
@@ -175,13 +183,19 @@ def fill_from_text_modular(state: ConversationState, module_idx: int, text: str)
             if v is not None:
                 _set(patch, f"ficha.via_aerea.{k}", v)
 
-    # —— antibucle: actualizar contador
+    # —— antibucle: resetear sólo si llenamos algún requerido que faltaba
     if patch:
-        _reset_retry(state, module_idx)
+        filled_required = any(_get({"ficha": patch}.get("ficha", {}), path) not in (None, "", [], {})
+                              for path in missing_before)
+        if filled_required:
+            _reset_retry(state, module_idx)
+        else:
+            _inc_retry(state, module_idx)
     else:
         _inc_retry(state, module_idx)
 
-    return patch
+    # envoltura: devolvemos siempre con clave "ficha" como espera routes.py
+    return {"ficha": patch} if patch else {}
 
 # ===== LLM prompts chicos por módulo =====
 
@@ -288,27 +302,29 @@ def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
 
 def advance_module(state: ConversationState) -> Tuple[Optional[int], Optional[str]]:
     """Devuelve (next_idx, next_prompt) o (None, None) si terminó.
-       Antibucle: si supera MAX_RETRIES en un módulo obligatorio, da fallback explícito."""
+       Antibucle: si supera MAX_RETRIES en un módulo obligatorio, muestra fallback y AVANZA."""
     for i in range(state.module_idx, len(MODULES)):
         missing = _missing_required(state, i)
         if missing:
-            # si está trabado en este módulo
             retries = _retries(state, i)
             if retries >= MAX_RETRIES:
                 name = MODULES[i]["name"]
-                # Mensaje de salida/fallback por módulo
                 if name == "DNI":
-                    return i, ("No logré entender tu DNI tras varios intentos. "
-                               "Escribilo SOLO con números, sin puntos ni espacios. Ejemplo: 12345678. "
-                               "Si preferís, podés escribir 'cancelar' y retomamos más tarde.")
+                    msg = ("No logré entender tu DNI tras varios intentos. "
+                           "Escribilo SOLO con números, sin puntos ni espacios. Ejemplo: 12345678. "
+                           "Si preferís, podés escribir 'cancelar' y retomamos más tarde.")
                 else:
-                    return i, ("No pude extraer datos válidos para este bloque. "
-                               "Probá con un formato más simple o decí 'saltar' para pasar al siguiente.")
-            # caso normal: pedir prompt del módulo
+                    msg = ("No pude extraer datos válidos para este bloque. "
+                           "Probá con un formato más simple o decí 'saltar' para pasar al siguiente.")
+                _reset_retry(state, i)
+                # avanzar al próximo módulo para cortar cualquier loop
+                next_idx = min(i + 1, len(MODULES) - 1)
+                return next_idx, msg
+            # caso normal: pedir input del módulo actual
             return i, prompt_for_module(i)
-        # incluso si no hay missing, igual pedimos input del módulo para confirmación breve
-        if i == state.module_idx:
-            return i, prompt_for_module(i)
+        # si el módulo actual no tiene faltantes, seguimos al próximo
+        continue
+    # si no quedan módulos con faltantes, terminamos
     return None, None
 
 def prompt_for_module(module_idx: int) -> str:
@@ -375,14 +391,15 @@ def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> 
 
 def merge_state(state: ConversationState, patch: Dict[str, Any]) -> ConversationState:
     """Merge shallow-recursive dict into Pydantic model."""
-    # usamos dump->merge->load para simplicidad
     base = json.loads(state.ficha.model_dump_json())
+
     def rec_merge(dst, src):
         for k, v in src.items():
             if isinstance(v, dict) and isinstance(dst.get(k), dict):
                 rec_merge(dst[k], v)
             else:
                 dst[k] = v
+
     rec_merge(base, patch.get("ficha", {}))
     state.ficha = FichaPreanestesia(**base)
     return state
