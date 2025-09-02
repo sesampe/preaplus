@@ -4,7 +4,6 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple
 import re
 
-
 # ============================================================================
 # Definición de MÓDULOS (en orden)
 # ============================================================================
@@ -56,21 +55,30 @@ MODULES = [
     },
 ]
 
-
 # ============================================================================
 # Helpers
 # ============================================================================
 
 def _ensure_ficha(state: Any) -> None:
+    """
+    Garantiza que state.ficha exista. Si es None, instancia FichaPreanestesia().
+    Import tardío para evitar ciclos.
+    """
     if not hasattr(state, "ficha") or state.ficha is None:
-        setattr(state, "ficha", {})
+        try:
+            from models.schemas import FichaPreanestesia  # type: ignore
+            state.ficha = FichaPreanestesia()
+        except Exception:
+            state.ficha = {}  # fallback seguro
 
 
 def merge_state(state: Any, patch: Dict[str, Any]) -> Any:
     """
     Fusiona un patch en el estado.
-    - Acepta {"ficha": {...}} o {...} directo.
-    - Ignora claves "internas" que empiecen con "_".
+    Acepta tanto {"ficha": {...}} como {...} directo.
+    - Si state.ficha es dict -> asignación por clave
+    - Si state.ficha es modelo/objeto -> setattr si el atributo existe
+    Ignora claves internas (empiezan con "_").
     """
     _ensure_ficha(state)
 
@@ -78,11 +86,23 @@ def merge_state(state: Any, patch: Dict[str, Any]) -> Any:
     if not isinstance(data, dict):
         return state
 
+    # Caso dict
+    if isinstance(state.ficha, dict):
+        for k, v in data.items():
+            if isinstance(k, str) and k.startswith("_"):
+                continue
+            state.ficha[k] = v
+        return state
+
+    # Caso objeto (pydantic/dataclass/etc.)
     for k, v in data.items():
         if isinstance(k, str) and k.startswith("_"):
-            # no persistimos flags internos
             continue
-        state.ficha[k] = v
+        if hasattr(state.ficha, k):
+            setattr(state.ficha, k, v)
+        else:
+            # Campo inexistente en el modelo: lo ignoramos
+            pass
     return state
 
 
@@ -94,32 +114,31 @@ def prompt_for_module(idx: int) -> str:
 
 def advance_module(state: Any) -> Tuple[Optional[int], Optional[str]]:
     """
-    Devuelve el índice del siguiente módulo a preguntar y su prompt.
-    Si ya no quedan módulos, devuelve (None, None).
-    Convención: routes.py incrementa state.module_idx cuando hubo datos.
-    Aquí solo resolvemos qué preguntar ahora.
+    Devuelve el índice del módulo a preguntar ahora y su prompt.
+    Si no quedan módulos, (None, None).
     """
     idx = getattr(state, "module_idx", 0) or 0
     if idx < 0:
         idx = 0
     if idx >= len(MODULES):
         return None, None
-    # Si aún quedan módulos desde idx en adelante, preguntamos el actual idx
     return idx, prompt_for_module(idx)
-
 
 # ============================================================================
 # Regex y parsers específicos por módulo
 # ============================================================================
 
-# saludos “inicio de conversación”
-_GREETING_RE = re.compile(r"^\s*(hola|buenas|hey|hi|qué\s+tal|buen\s*d[ií]a|buenas\s*tardes|buenas\s*noches)\b", re.IGNORECASE)
+# Saludo/inicio
+_GREETING_RE = re.compile(
+    r"^\s*(hola|buenas|hey|hi|qué\s*tal|buen\s*d[ií]a|buenas\s*tardes|buenas\s*noches)\b",
+    re.IGNORECASE,
+)
 
-# DNI: 6-10 dígitos, sin puntos
+# DNI
 _DNI_RE = re.compile(r"\b(?P<dni>\d{6,10})\b")
 
-# Nombre y fecha de nacimiento y sexo
-_NAME_RE = re.compile(r"(?:me\s+llamo|soy|nombre\s*:?)(?P<nombre>[\wÀ-ÿ'´`\- ]{3,})", re.IGNORECASE)
+# Datos personales
+_NAME_RE = re.compile(r"(?:me\s+llamo|soy|nombre\s*:?\s*)(?P<nombre>[\wÀ-ÿ'´`\- ]{3,})", re.IGNORECASE)
 _DOB_RE = re.compile(r"\b(?P<d>\d{1,2})[/-](?P<m>\d{1,2})[/-](?P<y>\d{2,4})\b")
 _SEX_RE = re.compile(r"\b(?P<sexo>[MFmf])\b")
 
@@ -129,46 +148,42 @@ _HEIGHT_RE = re.compile(r"(?:mido|talla|altura|cm|mts?|metros?)\D{0,5}(?P<talla>
 _HEIGHT_M_RE = re.compile(r"\b(?P<metros>1(?:[.,]\d{1,2})|0[.,]\d{1,2})\s*m", re.IGNORECASE)
 
 # Cobertura
-_OS_RE = re.compile(r"(?:obra\s+social|prepaga|cobertura)\s*:?[\s\-]*([A-Za-zÀ-ÿ0-9\. '\-]{2,})", re.IGNORECASE)
-_AFIL_RE = re.compile(r"(?:nro?\.?\s*afiliad[oa]|afiliad[oa])\s*:?[\s\-]*(?P<afil>[A-Za-z0-9\-\.]{4,})", re.IGNORECASE)
-_MOTIVO_RE = re.compile(r"(?:motivo|cirug[ií]a|procedimiento)\s*:?[\s\-]*(?P<motivo>[\wÀ-ÿ0-9,\. '\-]{3,})", re.IGNORECASE)
+_OS_RE = re.compile(r"(?:obra\s+social|prepaga|cobertura)\s*:?\s*[- ]*(?P<os>[A-Za-zÀ-ÿ0-9\. '\-]{2,})", re.IGNORECASE)
+_AFIL_RE = re.compile(r"(?:nro?\.?\s*afiliad[oa]|afiliad[oa])\s*:?\s*[- ]*(?P<afil>[A-Za-z0-9\-\.]{4,})", re.IGNORECASE)
+_MOTIVO_RE = re.compile(r"(?:motivo|cirug[ií]a|procedimiento)\s*:?\s*[- ]*(?P<motivo>[\wÀ-ÿ0-9,\. '\-]{3,})", re.IGNORECASE)
 
-# Alergias/medicación: capturamos texto libre post-palabra clave
-_ALERG_RE = re.compile(r"(?:alergias?|al[ée]rgico[as]?)\s*:?[\s\-]*(?P<alergias>.+)", re.IGNORECASE)
-_MEDIC_RE = re.compile(r"(?:medicaci[oó]n|tomo|tomas|toma)\s*:?[\s\-]*(?P<medicacion>.+)", re.IGNORECASE)
+# Alergias/medicación
+_ALERG_RE = re.compile(r"(?:alergias?|al[ée]rgico[as]?)\s*:?\s*[- ]*(?P<alergias>.+)", re.IGNORECASE)
+_MEDIC_RE = re.compile(r"(?:medicaci[oó]n|tomo|tomas|toma)\s*:?\s*[- ]*(?P<medicacion>.+)", re.IGNORECASE)
 
-# Antecedentes (texto libre)
-_ANTEC_RE = re.compile(r"(?:antecedentes?|enfermedades?|patolog[ií]a?s?)\s*:?[\s\-]*(?P<antecedentes>.+)", re.IGNORECASE)
+# Antecedentes
+_ANTEC_RE = re.compile(r"(?:antecedentes?|enfermedades?|patolog[ií]a?s?)\s*:?\s*[- ]*(?P<antecedentes>.+)", re.IGNORECASE)
 
-# Complementarios (texto libre)
-_COMPL_RE = re.compile(r"(?:estudios?|laboratorio|lab[s]?|electro|ecg|rx|placa|tc|mri|rmn)\s*:?[\s\-]*(?P<complementarios>.+)", re.IGNORECASE)
+# Complementarios
+_COMPL_RE = re.compile(r"(?:estudios?|laboratorio|lab[s]?|electro|ecg|rx|placa|tc|mri|rmn)\s*:?\s*[- ]*(?P<complementarios>.+)", re.IGNORECASE)
 
 # Sustancias
-_TABA_RE = re.compile(r"(?:tabaco|fumo|fum[oé]s?|cigarrillos?)\s*:?[\s\-]*(?P<tabaco>.+)", re.IGNORECASE)
-_ALCO_RE = re.compile(r"(?:alcohol|beb[eo]s?)\s*:?[\s\-]*(?P<alcohol>.+)", re.IGNORECASE)
-_OTRAS_RE = re.compile(r"(?:drogas?|sustancias?)\s*:?[\s\-]*(?P<otras>.+)", re.IGNORECASE)
+_TABA_RE = re.compile(r"(?:tabaco|fumo|fum[oé]s?|cigarrillos?)\s*:?\s*[- ]*(?P<tabaco>.+)", re.IGNORECASE)
+_ALCO_RE = re.compile(r"(?:alcohol|beb[eo]s?)\s*:?\s*[- ]*(?P<alcohol>.+)", re.IGNORECASE)
+_OTRAS_RE = re.compile(r"(?:drogas?|sustancias?)\s*:?\s*[- ]*(?P<otras>.+)", re.IGNORECASE)
 
-# Vía aérea (texto libre)
-_VA_RE = re.compile(r"(?:v[ií]a\s*a[ée]rea|mallampati|apertura|bucal|dentari[ao]s?|piezas|pr[oó]tesis)\s*:?[\s\-]*(?P<via_aerea>.+)", re.IGNORECASE)
-
+# Vía aérea
+_VA_RE = re.compile(r"(?:v[ií]a\s*a[ée]rea|mallampati|apertura|bucal|dentari[ao]s?|piezas|pr[oó]tesis)\s*:?\s*[- ]*(?P<via_aerea>.+)", re.IGNORECASE)
 
 def _norm_year(y: int) -> int:
     if y < 100:
-        # heurstica 00-21 -> 2000+, 22-99 -> 1900+
         return 2000 + y if y <= 21 else 1900 + y
     return y
 
-
 # ---------------- DNI ----------------
 def _parse_dni(text: str) -> Dict[str, Any]:
-    # Si es un saludo inicial, devolvemos un "flag" para avanzar sin error
+    # Saludo inicial: avanza sin error
     if _GREETING_RE.search(text.strip()):
         return {"_start": True}
     m = _DNI_RE.search(text)
     if m:
         return {"dni": m.group("dni")}
     return {}
-
 
 # ---------------- DATOS PERSONALES ----------------
 def _parse_datos(text: str) -> Dict[str, Any]:
@@ -178,16 +193,13 @@ def _parse_datos(text: str) -> Dict[str, Any]:
         out["nombre_completo"] = " ".join(mname.group("nombre").split())
     mdob = _DOB_RE.search(text)
     if mdob:
-        d = int(mdob.group("d"))
-        m = int(mdob.group("m"))
-        y = _norm_year(int(mdob.group("y")))
+        d = int(mdob.group("d")); m = int(mdob.group("m")); y = _norm_year(int(mdob.group("y")))
         if 1 <= d <= 31 and 1 <= m <= 12 and 1900 <= y <= 2100:
             out["fecha_nacimiento"] = f"{d:02d}/{m:02d}/{y:04d}"
     msex = _SEX_RE.search(text)
     if msex:
         out["sexo"] = msex.group("sexo").upper()
     return out
-
 
 # ---------------- ANTROPOMETRÍA ----------------
 def _parse_antropometria(text: str) -> Dict[str, Any]:
@@ -198,14 +210,12 @@ def _parse_antropometria(text: str) -> Dict[str, Any]:
             out["peso_kg"] = int(mw.group("peso"))
         except Exception:
             pass
-    # talla en cm
     mh = _HEIGHT_RE.search(text)
     if mh:
         try:
             out["talla_cm"] = int(mh.group("talla"))
         except Exception:
             pass
-    # talla en metros
     mm = _HEIGHT_M_RE.search(text)
     if mm and "talla_cm" not in out:
         try:
@@ -215,15 +225,14 @@ def _parse_antropometria(text: str) -> Dict[str, Any]:
             pass
     return out
 
-
 # ---------------- COBERTURA ----------------
 def _parse_cobertura(text: str) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     mo = _OS_RE.search(text)
     if mo:
-        os_val = mo.group(1).strip(" -:")
-        if os_val:
-            out["obra_social"] = os_val
+        val = mo.group("os").strip(" -:")
+        if val:
+            out["obra_social"] = val
     maf = _AFIL_RE.search(text)
     if maf:
         out["nro_afiliado"] = maf.group("afil").strip()
@@ -231,7 +240,6 @@ def _parse_cobertura(text: str) -> Dict[str, Any]:
     if mm:
         out["motivo_cirugia"] = mm.group("motivo").strip()
     return out
-
 
 # ---------------- ALERGIAS / MEDICACIÓN ----------------
 def _parse_alerg_med(text: str) -> Dict[str, Any]:
@@ -244,7 +252,6 @@ def _parse_alerg_med(text: str) -> Dict[str, Any]:
         out["medicacion"] = mm.group("medicacion").strip()
     return out
 
-
 # ---------------- ANTECEDENTES ----------------
 def _parse_antecedentes(text: str) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
@@ -253,7 +260,6 @@ def _parse_antecedentes(text: str) -> Dict[str, Any]:
         out["antecedentes"] = m.group("antecedentes").strip()
     return out
 
-
 # ---------------- COMPLEMENTARIOS ----------------
 def _parse_complementarios(text: str) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
@@ -261,7 +267,6 @@ def _parse_complementarios(text: str) -> Dict[str, Any]:
     if m:
         out["complementarios"] = m.group("complementarios").strip()
     return out
-
 
 # ---------------- SUSTANCIAS ----------------
 def _parse_sustancias(text: str) -> Dict[str, Any]:
@@ -277,7 +282,6 @@ def _parse_sustancias(text: str) -> Dict[str, Any]:
         out["otras_sustancias"] = mo.group("otras").strip()
     return out
 
-
 # ---------------- VÍA AÉREA ----------------
 def _parse_via_aerea(text: str) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
@@ -285,7 +289,6 @@ def _parse_via_aerea(text: str) -> Dict[str, Any]:
     if m:
         out["via_aerea"] = m.group("via_aerea").strip()
     return out
-
 
 # Mapa índice -> parser
 _PARSERS = {
@@ -300,33 +303,23 @@ _PARSERS = {
     8: _parse_via_aerea,
 }
 
-
 def fill_from_text_modular(state: Any, module_idx: int, text: str) -> Dict[str, Any]:
     """
-    Parser “local” por módulo (reglas simples).
-    - Si detecta saludo en el módulo 0 (inicio), devuelve {"_start": True}
-      para forzar avance sin mensaje de error.
-    - En los demás casos, devuelve {"ficha": {...}} o {}.
+    Parser local por módulo (reglas simples).
+    - Si detecta saludo en el módulo 0, devuelve {"_start": True} para saludar y avanzar.
+    - En general devuelve {"ficha": {...}} o {}.
     """
     parser = _PARSERS.get(module_idx)
     if not parser:
         return {}
-
     data = parser(text or "")
     if not data:
         return {}
-
-    # Si es solo “_start”, no guardamos en ficha (merge_state lo ignora igual).
     return {"ficha": data}
 
-
 def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
-    """
-    Placeholder para un parser basado en LLM si en el futuro
-    activás MODULES[idx]["use_llm"] = True.
-    """
+    """Placeholder para parsers basados en LLM si activás use_llm=True en algún módulo."""
     return {}
-
 
 def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> str:
     """
@@ -337,11 +330,9 @@ def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> 
     if not isinstance(ficha, dict):
         return "No pude extraer datos de este bloque."
 
-    # caso saludo inicial
     if module_idx == 0 and "_start" in ficha and len(ficha) == 1:
         return "¡Hola! Empecemos."
 
-    # filtrar claves internas
     public_items = [(k, v) for k, v in ficha.items() if not str(k).startswith("_")]
     if not public_items:
         return "No pude extraer datos de este bloque."
