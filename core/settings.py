@@ -60,41 +60,71 @@ APP_SECRET = os.getenv("APP_SECRET")
 # === Molde de salida para evaluación preanestésica (JSON) ===
 PREANESTHESIA_SCHEMA = r'''
 {
-  "paciente": {
-    "nombre_completo": "",
-    "dni": "",
+  "datos": {
+    "fecha_evaluacion": "DD/MM/AAAA",
+    "nombre_apellido": "",
     "fecha_nacimiento": "DD/MM/AAAA",
-    "telefono": "",
-    "email": "",
-    "direccion": ""
+    "edad_anios": null,
+    "peso_kg": null,
+    "talla_cm": null,
+    "imc": null,
+    "dni": "",
+    "obra_social": "",
+    "numero_afiliado": ""
   },
-  "antropometria": { "peso_kg": null, "talla_cm": null, "imc": null },
-  "procedimiento": { "descripcion": "", "fecha_prevista": "DD/MM/AAAA", "institucion": "" },
-  "antecedentes_medicos": {
-    "hta": false, "diabetes": false, "asma_epoc": false, "cardiopatia": false,
-    "apnea_sueno": false,
-    "tabaquismo": { "tabaquista": false, "paquetes_anio": null },
-    "alcohol": { "consumo": false, "frecuencia": "" },
+  "motivo_consulta_intervencion": "",
+  "antecedentes_patologicos": {
+    "alergicos": "",
+    "cardiovasculares": "",
+    "respiratorio": "",
+    "urologicos": "",
+    "hematologicos": "",
+    "endocrino_metabolico": "",
+    "neurologicos": "",
+    "quirurgicos": "",
+    "psiquiatricos": "",
+    "infecciosos": "",
+    "perinatales": "",
+    "gastrointestinales": "",
+    "posibilidad_embarazo": { "aplica": false, "fecha_ultima_menstruacion": "DD/MM/AAAA" },
     "otros": ""
   },
-  "alergias": {
-    "tiene_alergias": false,
-    "detalles": [ { "sustancia": "", "reaccion": "" } ]
+  "medicacion_habitual": "",
+  "consumo_sustancias_ilicitas": { "si": false, "detalle": "" },
+  "via_aerea": {
+    "antecedente_intubacion_dificultosa": null,
+    "dientes_flojos": null,
+    "protesis_dental": null,
+    "mallampati": "",
+    "test_mordida": { "mayor_0": null, "igual_0": null, "menor_0": null },
+    "apertura_oral_cm": null,
+    "distancia_tiromentoniana_cm": null,
+    "movilidad_cervical": { "mayor_35": null, "menor_35": null },
+    "factores_ventilacion_dificultosa": {
+      "obesidad_imc_mayor_26": false,
+      "barba": false,
+      "edad_mayor_55": false,
+      "saos_roncador": false,
+      "edentado": false
+    }
   },
-  "medicacion_actual": [ { "nombre": "", "dosis": "", "horario": "" } ],
-  "antecedentes_anestesicos": {
-    "complicaciones_previas": false, "detalle": "",
-    "nvpo_previo": false, "intubacion_dificil_previa": false
+  "examenes_complementarios": {
+    "hemograma": "",
+    "coagulograma": "",
+    "urograma": "",
+    "ecg": "",
+    "otros": "",
+    "valores": {
+      "hb": null, "hto": null, "plt": null, "gb": null,
+      "tp": null, "ttkp": null, "fibrinogeno": null,
+      "uremia": null, "creatininemia": null, "glucemia": null
+    }
   },
-  "ayuno": { "ultimos_solidos": "DD/MM/AAAA HH:MM", "ultimos_liquidos_claros": "DD/MM/AAAA HH:MM" },
-  "estudios": {
-    "laboratorio": { "fecha": "DD/MM/AAAA", "resumen": "" },
-    "ecg": { "fecha": "DD/MM/AAAA", "resultado": "" },
-    "rx_torax": { "fecha": "DD/MM/AAAA", "resultado": "" }
+  "evaluacion_preoperatoria": {
+    "asa": "",
+    "requiere_cama_uti": null,
+    "disponibilidad_hemoderivados": null
   },
-  "via_aerea": { "mallampati": "", "apertura_bucal_cm": null, "movilidad_cervical": "", "protesis_dentales": false },
-  "asa": "I",
-  "embarazo": { "aplica": false, "semanas": null },
   "observaciones": ""
 }
 '''

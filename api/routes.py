@@ -4,6 +4,7 @@ from typing import Dict, Any, Tuple
 
 from core.settings import HEYOO_PHONE_ID, HEYOO_TOKEN, OWNER_PHONE_NUMBER
 from core.logger import LoggerManager
+from core.structured_parser import llm_update_state
 from models.schemas import MessageRequest
 from services.security import verify_webhook_signature
 from services.conversation import conversation_service
@@ -18,6 +19,8 @@ from services.validators import (
 )
 from services.user_profiles import extract_name_with_llm
 from services.audio_processing import audio_processor
+
+FORM_STATE: Dict[str, Any] = {}
 
 class WhatsAppRouter:
     def __init__(self):
@@ -189,28 +192,45 @@ class WhatsAppRouter:
                 conversation_service.set_stage(sender_phone, "triage")
 
             # >>> SOLO aquí hablamos con el LLM <<<
-            try:
-                # Fuerza español en tu dispatcher (ver paso 3)
-                response_text = await get_llm_response(
-                    user_message,
-                    conversation_service.get_conversation_history(key),
-                    lang="es",  # si tu firma lo permite (ver abajo)
-                )
-            except Exception as e:
-                self.log.error(f"⚠️ Error consultando IA: {e}")
-                response_text = "Estamos con un inconveniente. ¿Querés que te contacte una persona?"
+            # Estado actual (si no tenés persistencia propia):
+            current_state = FORM_STATE.get(key, {})
 
-            conversation_service.add_to_conversation_history(key, "assistant", response_text)
-            self.wa_client.send_message(response_text, sender_phone)
+            # 1) Extraer con structured output + merge/normalización
+            updated_state = llm_update_state(user_message, current_state)
+
+            # 2) Guardar el nuevo estado (cambiá esto por conversation_service.set_form_state(key, updated_state) si lo tenés)
+            FORM_STATE[key] = updated_state
+
+            # 3) Armar confirmación humana breve
+            confirms = []
+            ant = updated_state.get("antropometria", {})
+            prev_ant = (current_state.get("antropometria") or {}) if current_state else {}
+
+            if ant.get("talla_cm") and ant.get("talla_cm") != prev_ant.get("talla_cm"):
+                confirms.append(f"Estatura: {int(ant['talla_cm'])} cm")
+            if ant.get("peso_kg") and ant.get("peso_kg") != prev_ant.get("peso_kg"):
+                confirms.append(f"Peso: {ant['peso_kg']} kg")
+            if ant.get("imc") and ant.get("imc") != prev_ant.get("imc"):
+                confirms.append(f"IMC: {ant['imc']}")
+
+            alerg = updated_state.get("alergias", {})
+            prev_alerg = (current_state.get("alergias") or {}) if current_state else {}
+            if alerg.get("tiene_alergias") is True and alerg.get("tiene_alergias") != prev_alerg.get("tiene_alergias"):
+                confirms.append("Alergias: sí")
+            elif alerg.get("tiene_alergias") is False and alerg.get("tiene_alergias") != prev_alerg.get("tiene_alergias"):
+                confirms.append("Alergias: no")
+
+            asa = (updated_state.get("evaluacion_preoperatoria") or {}).get("asa") or updated_state.get("asa")
+            prev_asa = (current_state.get("evaluacion_preoperatoria") or {}).get("asa") if current_state else None
+            if asa and asa != prev_asa:
+                confirms.append(f"ASA: {asa}")
+
+            msg = ("Anoté: " + "; ".join(confirms) + ". ¿Seguimos?") if confirms \
+                else "Gracias. ¿Seguimos con la siguiente pregunta?"
+
+            self.wa_client.send_message(msg, sender_phone)
             return {"status": "responded"}, 200
 
-        except Exception as e: # (SI HUBO CUALQUIER ERROR EN ESTE def, DA UN LOG PARA QUE LO VEAMOS Y AVISA A WHATSAPP ASI NO SIGUE AVISANDO)
-            self.log.error(f"⚠️ Error al parsear mensaje o status: {e}")
-            try:
-                self.log.error(f"Payload recibido: {data['entry'][0]['changes'][0]['value']}")
-            except:
-                self.log.error("No se pudo imprimir el valor del webhook recibido.")
-            return {"status": "ignored"}, 200
 
     async def send_manual_message(self, request: MessageRequest) -> Dict[str, Any]: #ESTE ES UN def POR SI QUEREMOS MANDAR UN MENSAJE MANUALMENTE DESDE LA API
         """Send a manual message to a WhatsApp user."""
