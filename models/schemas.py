@@ -132,7 +132,7 @@ class FichaPreanestesia(BaseModel):
     sustancias: Sustancias = Field(default_factory=Sustancias)
     via_aerea: ViaAerea = Field(default_factory=ViaAerea)
 
-# ===== Estado de conversación =====
+# ===== Estado de conversación (workflow modular) =====
 
 class ConversationState(BaseModel):
     user_id: str
@@ -141,3 +141,12 @@ class ConversationState(BaseModel):
     trace: Dict[str, Dict[str, str]] = Field(default_factory=dict)  # module.field -> raw text
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+# ===== Contexto de conversación (servicio de chat) =====
+
+class ConversationContext(BaseModel):
+    customer_phone: str
+    last_message_timestamp: datetime
+    last_intent: Optional[str] = None
+    current_order_id: Optional[str] = None
+    human_takeover: bool = False
