@@ -10,7 +10,7 @@ from services.validators import (
     parse_afiliado, parse_tabaco, parse_alcohol, parse_via_aerea,
     hb_en_rango, plaquetas_en_rango, creatinina_en_rango, inr_en_rango
 )
-from llm_client import llm_client
+from services.llm_client import llm_client
 
 # ===== Definición de módulos =====
 
