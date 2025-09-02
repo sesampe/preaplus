@@ -33,6 +33,11 @@ PRODUCT_LIST_FILE_ID = os.getenv("PRODUCT_LIST_FILE_ID", "")
 CATALOG_PDF_LINK = os.getenv("CATALOG_PDF_LINK", "")
 PRODUCTS_CACHE_FILE = str(DATA_DIR / "products_cache.json")
 
+# ---------- LLM provider (nuevo para compatibilidad con health.py) ----------
+# Permite seleccionar el proveedor de LLM por variable de entorno.
+# Valores esperados: "openai", "claude", etc. Por defecto "openai".
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").strip().lower()
+
 # ---------- objeto settings (compatibilidad) ----------
 class _Settings:
     # Paths
@@ -59,6 +64,7 @@ class _Settings:
     LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "2"))
     LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-3.5-turbo")
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0"))
+    LLM_PROVIDER: str = LLM_PROVIDER  # ← añadido
 
     # ---------- Alias de compatibilidad (legacy) ----------
     # Si existen variables OPENAI_* en el entorno, se priorizan; si no, usan las LLM_*
@@ -96,6 +102,7 @@ __all__ = [
     "LLM_MAX_RETRIES",
     "LLM_MODEL",
     "LLM_TEMPERATURE",
+    "LLM_PROVIDER",  # ← añadido para exportarlo
     # Alias legacy
     "OPENAI_MODEL",
     "OPENAI_API_BASE",
