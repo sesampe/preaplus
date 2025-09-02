@@ -10,4 +10,4 @@ google-api-python-client
 openpyxl   # Necesario si tu archivo de productos es .xlsx
 heyoo
 reportlab
-openai
+openai>=1.45.0
