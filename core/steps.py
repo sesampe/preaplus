@@ -1,157 +1,185 @@
-# routes.py
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
-from typing import Dict, Any, Tuple
-from datetime import datetime
+# core/steps.py
+from __future__ import annotations
 
-from core.settings import HEYOO_PHONE_ID, HEYOO_TOKEN
-from heyoo import WhatsApp
+from typing import Any, Dict, Optional, Tuple
+import re
 
-from models.schemas import ConversationState
-from core.steps import (
-    fill_from_text_modular,
-    llm_parse_modular,
-    advance_module,
-    merge_state,
-    summarize_patch_for_confirmation,
-    MODULES,
-    prompt_for_module,
-)
 
-router = APIRouter()
+# ============================================================================
+# Definición de módulos
+# - name: nombre legible del bloque
+# - use_llm: si ese bloque debería intentar parseo "inteligente" (aquí: False)
+# - prompt: texto guía para el siguiente input del usuario
+# Podés ajustar prompts, orden y cantidad sin romper las firmas públicas.
+# ============================================================================
+MODULES = [
+    {
+        "name": "Identificación",
+        "use_llm": False,
+        "prompt": "¿Cuál es tu nombre y apellido? Podés escribir: 'Me llamo Ana Pérez'.",
+    },
+    {
+        "name": "Datos demográficos",
+        "use_llm": False,
+        "prompt": "¿Cuál es tu edad (en años) y sexo (M/F)? Ej: 'Tengo 34 años, F'.",
+    },
+    {
+        "name": "Signos/antropometría",
+        "use_llm": False,
+        "prompt": "Si querés, agregá peso (kg) y talla (cm). Ej: 'Peso 70 kg y mido 165 cm'.",
+    },
+]
 
-# Cliente WhatsApp
-wa_client = WhatsApp(token=HEYOO_TOKEN, phone_number_id=HEYOO_PHONE_ID)
 
-# Hardcodeá tu número acá
-HARDCODED_USER_ID = "542616463629"
+# ============================================================================
+# Helpers de parseo muy livianos (reglas) para evitar dependencia circular
+# y mantener un comportamiento estable si no hay parsers “LLM”.
+# ============================================================================
 
-# ====== Almacenamiento en memoria ======
-_USER_STATE: Dict[str, ConversationState] = {}
+def _ensure_ficha(state: Any) -> None:
+    """Garantiza que el objeto state tenga el dict 'ficha'."""
+    if not hasattr(state, "ficha") or state.ficha is None:
+        setattr(state, "ficha", {})
 
-def load_state(user_id: str) -> ConversationState:
-    st = _USER_STATE.get(user_id)
-    if st is None:
-        st = ConversationState(user_id=user_id)
-        _USER_STATE[user_id] = st
-    return st
 
-def save_state(state: ConversationState):
-    state.updated_at = datetime.utcnow()
-    _USER_STATE[state.user_id] = state
-
-# ====== Helpers ======
-
-def _extract_text(payload: Dict[str, Any]) -> str:
+def merge_state(state: Any, patch: Dict[str, Any]) -> Any:
     """
-    Extrae texto de distintos formatos de webhook.
-    Ignora eventos sin texto (p.ej., 'statuses' de WhatsApp Cloud).
+    Fusiona un patch en el estado.
+    Acepta tanto {"ficha": {...}} como {...} directo.
+    Devuelve el propio state para encadenar.
     """
-    # 1) Formato oficial Meta (WhatsApp Cloud)
-    try:
-        entry = payload.get("entry", [])[0]
-        change = entry.get("changes", [])[0]
-        value = change.get("value", {})
+    _ensure_ficha(state)
 
-        # Si es un evento de status (entregado/leído), no hay que responder
-        if value.get("statuses"):
-            return "__IGNORE_STATUS_EVENT__"
+    data = patch.get("ficha", patch)
+    if not isinstance(data, dict):
+        return state
 
-        msgs = value.get("messages") or []
-        if msgs:
-            msg = msgs[0]
-            if msg.get("type") == "text":
-                return msg.get("text", {}).get("body", "") or ""
-    except Exception:
-        pass
+    # Merge superficial (no deep-merge recursivo)
+    for k, v in data.items():
+        state.ficha[k] = v
+    return state
 
-    # 2) Variantes “compatibles” usadas en tests locales
-    text = payload.get("text") or payload.get("message") or payload.get("body") or ""
-    if not text and "messages" in payload:
-        msgs = payload["messages"]
-        if isinstance(msgs, list) and msgs:
-            m0 = msgs[0]
-            if isinstance(m0, dict) and "text" in m0:
-                text = m0["text"].get("body", "") or ""
-    return text or ""
 
-# ====== Core TRIAGE ======
-def _triage_block(state: ConversationState, text: str) -> Tuple[str, ConversationState]:
-    module_idx = state.module_idx
+def prompt_for_module(idx: int) -> str:
+    """Devuelve el prompt guía del módulo idx (con fallback seguro)."""
+    if 0 <= idx < len(MODULES):
+        return MODULES[idx].get("prompt") or f"Completá el bloque: {MODULES[idx]['name']}."
+    return "Continuemos con el siguiente bloque."
 
-    # 1) Patch local
-    patch_local = fill_from_text_modular(state, module_idx, text or "")
-    if patch_local:
-        # merge_state acepta {"ficha": patch} o patch directo
-        state = merge_state(state, {"ficha": patch_local.get("ficha", patch_local)})
 
-    # 2) Patch LLM (si el módulo lo usa)
-    patch_llm: Dict[str, Any] = {}
-    if MODULES[module_idx]["use_llm"]:
-        patch_llm = llm_parse_modular(text or "", module_idx) or {}
-        if patch_llm:
-            state = merge_state(state, {"ficha": patch_llm.get("ficha", patch_llm)})
+def advance_module(state: Any) -> Tuple[Optional[int], Optional[str]]:
+    """
+    Indica el 'siguiente' módulo a pedir, dada la posición actual en state.module_idx.
+    Convención usada por routes.py:
+      - Si ya estamos en el último módulo, devolver (None, None) para marcar fin.
+      - En caso contrario, devolver (idx_actual, prompt_de_ese_módulo).
+    OJO: routes.py incrementa module_idx cuando hubo datos; aquí no lo tocamos.
+    """
+    idx = getattr(state, "module_idx", 0) or 0
+    # Normalizamos idx por si viene fuera de rango
+    if idx < 0:
+        idx = 0
+    if idx >= len(MODULES) - 1:
+        # Si está en el último (o más allá), no hay siguiente
+        return None, None
+    # Si no estamos en el último, el “siguiente a preguntar” es el índice actual
+    return idx, prompt_for_module(idx)
 
-    # 3) Confirmación usando el patch combinado (soporta shapes con/sin "ficha")
-    combined = {"ficha": {}}
-    if patch_local:
-        combined["ficha"].update(patch_local.get("ficha", patch_local))
-    if patch_llm:
-        combined["ficha"].update(patch_llm.get("ficha", patch_llm))
 
-    had_any = bool(combined["ficha"])
-    confirm = (
-        summarize_patch_for_confirmation(combined, module_idx)
-        if had_any else "No pude extraer datos de este bloque."
-    )
+# ============================================================================
+# Parsers modulares (reglas simples). Si no matchean, devuelven {}.
+# Esto permite que el flujo siga funcionando aunque el usuario envíe texto libre.
+# ============================================================================
 
-    # 4) Avance: solo si hubo algo que anotar
-    if had_any:
-        state.module_idx = min(state.module_idx + 1, len(MODULES) - 1)
+_name_re = re.compile(r"(?:me\s+llamo|soy|nombre\s*:\s*)(?P<nombre>[\wÀ-ÿ'\- ]{3,})", re.IGNORECASE)
+_age_re = re.compile(r"(?P<edad>\d{1,3})\s*(?:años|año)?", re.IGNORECASE)
+_sex_re = re.compile(r"\b(?P<sexo>[MFmf])\b")
+_weight_re = re.compile(r"(?:peso|pesa|kg)\D{0,5}(?P<peso>\d{1,3})(?:[.,]\d)?", re.IGNORECASE)
+_height_re = re.compile(r"(?:mido|talla|cm)\D{0,5}(?P<talla>\d{2,3})(?:[.,]\d)?", re.IGNORECASE)
 
-    next_idx, next_prompt = advance_module(state)
-    if next_idx is None:
-        reply = f"{confirm} ¡Listo! Completamos todos los bloques."
-    else:
-        state.module_idx = next_idx
-        reply = f"{confirm} {next_prompt}"
-    return reply, state
 
-# ====== HTTP ======
-@router.post("/webhook")
-async def webhook(req: Request):
-    payload = await req.json()
+def _parse_identificacion(text: str) -> Dict[str, Any]:
+    patch: Dict[str, Any] = {}
+    m = _name_re.search(text or "")
+    if m:
+        patch["nombre_completo"] = m.group("nombre").strip()
+    return patch
 
-    text = _extract_text(payload)
 
-    # Ignorar eventos sin texto y eventos de status
-    if text == "__IGNORE_STATUS_EVENT__":
-        return JSONResponse({"ok": True, "ignored": "status_event"})
-    if not text:
-        return JSONResponse({"ok": True, "ignored": "no_text_message"})
+def _parse_demografia(text: str) -> Dict[str, Any]:
+    patch: Dict[str, Any] = {}
+    m_age = _age_re.search(text or "")
+    if m_age:
+        try:
+            age = int(m_age.group("edad"))
+            if 0 < age < 130:
+                patch["edad"] = age
+        except Exception:
+            pass
+    m_sex = _sex_re.search(text or "")
+    if m_sex:
+        patch["sexo"] = m_sex.group("sexo").upper()
+    return patch
 
-    # Siempre usar el hardcode
-    user_id = HARDCODED_USER_ID
 
-    state = load_state(user_id)
-    reply, state = _triage_block(state, text)
-    save_state(state)
+def _parse_antropometria(text: str) -> Dict[str, Any]:
+    patch: Dict[str, Any] = {}
+    m_w = _weight_re.search(text or "")
+    if m_w:
+        try:
+            patch["peso_kg"] = int(m_w.group("peso"))
+        except Exception:
+            pass
+    m_h = _height_re.search(text or "")
+    if m_h:
+        try:
+            patch["talla_cm"] = int(m_h.group("talla"))
+        except Exception:
+            pass
+    return patch
 
-    # Enviar por WhatsApp
-    try:
-        wa_client.send_message(message=reply, recipient_id=user_id)
-        sent = True
-    except Exception:
-        sent = False
 
-    return JSONResponse({
-        "to": user_id,
-        "echo_text": text,
-        "reply": reply,
-        "sent": sent,
-        "module": MODULES[state.module_idx]["name"],
-    })
+_PARSERS = {
+    0: _parse_identificacion,
+    1: _parse_demografia,
+    2: _parse_antropometria,
+}
 
-@router.get("/health")
-def health():
-    return {"ok": True}
+
+def fill_from_text_modular(state: Any, module_idx: int, text: str) -> Dict[str, Any]:
+    """
+    Parser “local” por módulo (reglas simples).
+    Devuelve {"ficha": {...}} si encuentra algo; si no, {}.
+    """
+    parser = _PARSERS.get(module_idx)
+    if not parser:
+        return {}
+    data = parser(text or "")
+    return {"ficha": data} if data else {}
+
+
+def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
+    """
+    Placeholder para un parser “LLM”. Como en MODULES.use_llm lo tenemos en False,
+    normalmente no se invoca. Igual devolvemos {} para mantener la firma.
+    """
+    return {}
+
+
+def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> str:
+    """
+    Crea un texto corto confirmando lo que se capturó en el bloque actual.
+    Acepta formas con o sin 'ficha'. Si no hay datos, devuelve un mensaje neutro.
+    """
+    ficha = patch.get("ficha", patch) or {}
+    if not isinstance(ficha, dict) or not ficha:
+        return "No pude extraer datos de este bloque."
+
+    # Armamos una lista "clave: valor" ordenada para confirmación breve
+    items = []
+    for k, v in ficha.items():
+        items.append(f"{k}: {v}")
+
+    modulo_name = MODULES[module_idx]["name"] if 0 <= module_idx < len(MODULES) else "Bloque"
+    joined = "; ".join(items)
+    return f"Anoté en {modulo_name}: {joined}."
