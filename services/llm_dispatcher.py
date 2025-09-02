@@ -7,7 +7,7 @@ llm_ask_functions = {
     "openai": llm_client.ask_gpt
 }
 
-async def get_llm_response(user_message: str, conversation: list) -> str:
+async def get_llm_response(user_message: str, conversation: list, lang=None) -> str:
     """Get response from the configured LLM provider."""
     ask_function = llm_ask_functions.get(LLM_PROVIDER)
 
