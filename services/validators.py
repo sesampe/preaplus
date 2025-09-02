@@ -191,7 +191,7 @@ def parse_via_aerea(text: str) -> Dict[str, Optional[bool]]:
             flags["protesis_dentaria"] = False
         if "apnea" in t:
             flags["ronquidos_apnea"] = False
-        if "dientes flojos" in t o r "diente flojo" in t:
+        if "dientes flojos" in t or "diente flojo" in t:
             flags["dientes_flojos"] = False
     return flags
 
