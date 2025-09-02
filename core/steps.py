@@ -2,9 +2,15 @@
 from typing import Dict, Any, List, Tuple, Optional
 from datetime import date
 import json
-import re  # <- agregado
+import re
+from collections import defaultdict
 
-from models.schemas import ConversationState, FichaPreanestesia, AlergiaMedicacion, Alergias, AlergiaItem, MedicacionItem, Antecedentes, Cardio, Respiratorio, Endocrino, Renal, Neuro, Complementarios, Labs, ImagenItem
+from models.schemas import (
+    ConversationState, FichaPreanestesia,
+    AlergiaMedicacion, Alergias, AlergiaItem, MedicacionItem,
+    Antecedentes, Cardio, Respiratorio, Endocrino, Renal, Neuro,
+    Complementarios, Labs, ImagenItem
+)
 from services.validators import (
     parse_dni, parse_fecha, edad_from_fecha_nacimiento,
     parse_peso_kg, parse_talla_cm, calc_imc,
@@ -15,32 +21,28 @@ from services.llm_client import llm_client
 
 # ===== Config antibucle =====
 MAX_RETRIES = 3  # intentos por módulo antes de dar fallback
+# mapa global: id(state) -> { module_name: retries }
+_RETRY_COUNTS: Dict[int, Dict[str, int]] = defaultdict(dict)
 
 def _module_key(idx: int) -> str:
     return MODULES[idx]["name"]
 
-def _ensure_retry_bucket(state: ConversationState):
-    # ⛳️ Si tu ConversationState no tiene retry_counts, agregalo al modelo.
-    if not hasattr(state, "retry_counts") or state.retry_counts is None:
-        # @@@ si preferís otro bucket (p.ej. state.meta), cambiá esta línea:
-        state.retry_counts = {}  # type: ignore[attr-defined]
-
 def _inc_retry(state: ConversationState, module_idx: int) -> int:
-    _ensure_retry_bucket(state)
+    sid = id(state)
     k = _module_key(module_idx)
-    cur = state.retry_counts.get(k, 0)  # type: ignore[index]
-    state.retry_counts[k] = cur + 1     # type: ignore[index]
-    return state.retry_counts[k]        # type: ignore[index]
+    cur = _RETRY_COUNTS[sid].get(k, 0) + 1
+    _RETRY_COUNTS[sid][k] = cur
+    return cur
 
 def _reset_retry(state: ConversationState, module_idx: int):
-    _ensure_retry_bucket(state)
+    sid = id(state)
     k = _module_key(module_idx)
-    if k in state.retry_counts:          # type: ignore[operator]
-        state.retry_counts[k] = 0        # type: ignore[index]
+    if k in _RETRY_COUNTS[sid]:
+        _RETRY_COUNTS[sid][k] = 0
 
 def _retries(state: ConversationState, module_idx: int) -> int:
-    _ensure_retry_bucket(state)
-    return int(state.retry_counts.get(_module_key(module_idx), 0))  # type: ignore[index]
+    sid = id(state)
+    return int(_RETRY_COUNTS[sid].get(_module_key(module_idx), 0))
 
 # ===== Definición de módulos =====
 
@@ -133,8 +135,10 @@ def fill_from_text_modular(state: ConversationState, module_idx: int, text: str)
             _set(patch, "ficha.antropometria.peso_kg", peso)
         if talla is not None:
             _set(patch, "ficha.antropometria.talla_cm", talla)
-        imc = calc_imc(peso if peso is not None else state.ficha.antropometria.peso_kg,
-                       talla if talla is not None else state.ficha.antropometria.talla_cm)
+        imc = calc_imc(
+            peso if peso is not None else state.ficha.antropometria.peso_kg,
+            talla if talla is not None else state.ficha.antropometria.talla_cm
+        )
         if imc is not None:
             _set(patch, "ficha.antropometria.imc", imc)
 
@@ -143,7 +147,7 @@ def fill_from_text_modular(state: ConversationState, module_idx: int, text: str)
         afiliado = parse_afiliado(text)
         if afiliado:
             _set(patch, "ficha.cobertura.afiliado", afiliado)
-        # heurística para OS y motivo
+        # heurística para OS: toma todo el texto si no hay nada cargado aún
         t = (text or "").strip()
         if t and len(t) >= 3:
             if not state.ficha.cobertura.obra_social:
@@ -171,7 +175,7 @@ def fill_from_text_modular(state: ConversationState, module_idx: int, text: str)
             if v is not None:
                 _set(patch, f"ficha.via_aerea.{k}", v)
 
-    # —— antibucle: actualizar contador acá
+    # —— antibucle: actualizar contador
     if patch:
         _reset_retry(state, module_idx)
     else:
