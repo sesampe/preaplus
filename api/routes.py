@@ -152,41 +152,52 @@ class WhatsAppRouter:
             profile_info = value.get("contacts", [{}])[0].get("profile", {})
             user_name = profile_info.get("name")
             
-            # Saludo solo si es conversación nueva
-            sender_phone = "542616463629"
-            if not conversation_service.get_conversation_history(sender_phone):
+            # 1) Si es conversación nueva para este número, inicializá el estado y pedí DNI una sola vez
+            stage = conversation_service.get_stage(sender_phone)
+            if stage is None:
+                conversation_service.set_stage(sender_phone, "awaiting_dni")
                 self.wa_client.send_message(
-                    "¡Hola! Soy tu médico anestesiólogo y voy a realizarte unas preguntas para completar tu ficha anestesiológica:",
-                    sender_phone
+                    "¡Hola! Soy tu médico anestesiólogo y voy a realizarte unas preguntas para completar tu ficha anestesiológica.",
+                    sender_phone,
                 )
-                self.wa_client.send_message("PARA INICIAR, INGRESE SU DNI:", sender_phone)
+                self.wa_client.send_message("Para iniciar, por favor ingresá tu DNI:", sender_phone)
+                return {"status": "greeted_and_requested_dni"}, 200
 
-            # Intentar leer un DNI en este mensaje
-            dni = await self.is_valid_dni(user_message)
+            # 2) Manejo por estado
+            if stage == "awaiting_dni":
+                dni = await self.is_valid_dni(user_message)
+                if not dni:
+                    self.wa_client.send_message("Por favor, ingresá un DNI válido (solo números, sin puntos).", sender_phone)
+                    return {"status": "dni_reprompted"}, 200
 
-            if dni:
-                # Renombrar el archivo de conversación al DNI y seguir usando el DNI como key
+                # Mapear este teléfono a la key = DNI, renombrar archivo, mover historial si hace falta
                 conversation_service.rename_conversation_file(sender_phone, dni)
-                key = dni
-                self.log.debug(f"JSON cambiado de nombre a: {dni}")
-            else:
-                # Si aún no tenemos DNI registrado para este usuario, pedirlo y cortar
-                if not conversation_service.has_conversation_key(sender_phone) and not conversation_service.has_conversation_key_for_user(sender_phone):
-                    self.wa_client.send_message("POR FAVOR, INGRESE DNI VÁLIDO:", sender_phone)
-                    return {"status": "dni_requested"}, 200
-                # Si ya lo teníamos de antes, recuperarlo
-                key = conversation_service.get_key_for_user(sender_phone)
+                conversation_service.set_user_key(sender_phone, dni)
+                conversation_service.set_stage(sender_phone, "triage")
 
-            # Obtener respuesta del LLM con el historial bajo la key correcta
+                self.log.debug(f"Conversación asociada a DNI {dni}")
+                self.wa_client.send_message(f"¡Gracias! Registré tu DNI: {dni}.", sender_phone)
+                # Podés seguir con tu primer pregunta clínica aquí y cortar SIN LLM:
+                self.wa_client.send_message("¿Tenés alguna alergia a medicamentos o alimentos?", sender_phone)
+                return {"status": "dni_registered"}, 200
+
+            # 3) A partir de acá, ya tenemos DNI → usar esa key SIEMPRE
+            key = conversation_service.get_user_key(sender_phone) or sender_phone  # fallback defensivo
+            if conversation_service.get_stage(sender_phone) != "triage":
+                # Si por alguna razón el estado no es triage, forzalo
+                conversation_service.set_stage(sender_phone, "triage")
+
+            # >>> SOLO aquí hablamos con el LLM <<<
             try:
-                self.log.info(f"🧠 Consultando modelo IA para key={key}")
+                # Fuerza español en tu dispatcher (ver paso 3)
                 response_text = await get_llm_response(
                     user_message,
-                    conversation_service.get_conversation_history(key)
+                    conversation_service.get_conversation_history(key),
+                    lang="es",  # si tu firma lo permite (ver abajo)
                 )
             except Exception as e:
                 self.log.error(f"⚠️ Error consultando IA: {e}")
-                response_text = "Estamos experimentando dificultades. ¿Querés que te conecte con una persona?"
+                response_text = "Estamos con un inconveniente. ¿Querés que te contacte una persona?"
 
             conversation_service.add_to_conversation_history(key, "assistant", response_text)
             self.wa_client.send_message(response_text, sender_phone)

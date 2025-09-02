@@ -56,6 +56,18 @@ class ConversationService:
         filename = self._sanitize_phone(phone_number) + ".json"
         return os.path.join(CONVERSATION_HISTORY_DIR, filename)
     
+    
+    # -----------------------------
+    # Conversation STAGES
+    # -----------------------------
+    
+    def get_stage(user_key: str) -> str | None: ...
+    def set_stage(user_key: str, stage: str) -> None: ...
+    def set_user_key(phone: str, key: str) -> None: ...
+    def get_user_key(phone: str) -> str | None: ...
+    def has_history(key: str) -> bool: ...
+
+    
     # -----------------------------
     # Conversation Context Management
     # -----------------------------
