@@ -1,108 +1,151 @@
-import httpx
+# validators.py
 import re
+from datetime import date, datetime
+from typing import Optional, Tuple
 
-from heyoo import WhatsApp
+# ===== Util =====
 
-from core.logger import LoggerManager  # 🚀 Logger agregado
-from core.settings import OPENAI_API_KEY, OPENAI_MODEL
-
-# Instanciar logger
-log = LoggerManager(name="validators", level="INFO", log_to_file=False).get_logger()
-
-# Configuraciones
-MIN_MESSAGE_LENGTH = 2
-MAX_MESSAGE_LENGTH = 200
-ALLOWED_COUNTRY_PREFIX = "54"
-
-def validate_message_content(user_message: str, sender_phone: str, wa_client: WhatsApp) -> dict:
-    """
-    Valida el contenido de un mensaje.
-    Devuelve un diccionario con 'valid': True/False y 'status': tipo de error si aplica.
-    """
-    if not user_message or len(user_message.strip()) == 0:
-        log.warning(f"⚠️ Mensaje vacío recibido de {sender_phone}")
-        wa_client.send_message("No entendí tu mensaje, ¿podrías escribirlo de nuevo? ✍️", sender_phone)
-        return {"valid": False, "status": "empty_message"}
-
-    # if len(user_message.strip()) < MIN_MESSAGE_LENGTH:
-    #     log.warning(f"⚠️ Mensaje demasiado corto de {sender_phone}: {user_message}")
-    #     wa_client.send_message("Tu mensaje es muy corto, ¿podrías darme más detalles? 📄", sender_phone)
-    #     return {"valid": False, "status": "short_message"}
-
-    if len(user_message) > MAX_MESSAGE_LENGTH:
-        log.warning(f"⚠️ Mensaje demasiado largo de {sender_phone}: {len(user_message)} caracteres")
-        log.warning(f"Mensaje: {user_message}")
-        wa_client.send_message("Tu mensaje es muy largo. ¿Podrías resumirlo un poco? ✂️", sender_phone)
-        return {"valid": False, "status": "long_message"}
-
-    return {"valid": True, "status": "ok"}
-
-def validate_phone_country(sender_phone: str, wa_client: WhatsApp) -> dict:
-    """
-    Valida si el número pertenece al país permitido.
-    """
-    if not sender_phone.startswith(ALLOWED_COUNTRY_PREFIX):
-        log.warning(f"❌ Número de país no permitido: {sender_phone}")
-        wa_client.send_message("Este servicio solo está disponible para teléfonos de Argentina 🇦🇷", sender_phone)
-        return {"valid": False, "status": "unsupported_country"}
-    
-    return {"valid": True, "status": "ok"}
-
-def detect_prompt_injection(user_message: str) -> bool:
-    """
-    Detecta patrones peligrosos que intentan modificar el comportamiento del asistente.
-    """
-    patrones_peligrosos = [
-        "olvida todas las instrucciones",
-        "ignore previous instructions",
-        "you are free now",
-        "please jailbreak",
-        "override all previous directions",
-        "haz caso omiso de lo anterior",
-        "desobedece las órdenes",
-        "imagine you are playing",
-    ]
-
-    lower_message = user_message.lower()
-    for pattern in patrones_peligrosos:
-        if pattern in lower_message:
-            log.warning(f"🚨 Posible intento de prompt injection detectado: patrón '{pattern}' encontrado.")
-            return True
-
-    return False
-
-def es_nombre_valido(nombre: str) -> bool:
-    """Verifica si contiene al menos una letra."""
-    if not nombre:
-        return False
-    return bool(re.search(r'[a-zA-ZáéíóúÁÉÍÓÚñÑ]', nombre))
-
-async def is_real_name_with_gpt(nombre: str) -> bool:
-    """Pregunta a GPT si el texto parece ser un nombre real."""
-    prompt = f'Dado el siguiente texto, dime solamente "Sí" si parece un nombre real de persona, o "No" si no lo es:\n"{nombre}"'
-
+def _to_float(num: str) -> Optional[float]:
+    if not num:
+        return None
+    num = num.strip().replace(",", ".")
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENAI_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": OPENAI_MODEL,
-                    "messages": [
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0,
-                    "max_tokens": 3,
-                }
-            )
-            response.raise_for_status()
-            result = response.json()
-            text = result["choices"][0]["message"]["content"].strip().lower()
-            return "sí" in text or "si" in text
-    except Exception as e:
-        # 🚨 No rompemos flujo si falla GPT
-        print(f"⚠️ Error validando nombre con GPT: {e}")
-        return False
+        return float(num)
+    except ValueError:
+        return None
+
+def _clamp(v: Optional[float], lo: float, hi: float) -> Optional[float]:
+    if v is None:
+        return None
+    if v < lo or v > hi:
+        return None
+    return v
+
+# ===== DNI =====
+
+_DNI_RE = re.compile(r"\b(\d{7,9})\b")
+
+def parse_dni(text: str) -> Optional[str]:
+    # acepta con puntos también
+    text_clean = re.sub(r"[.\s]", "", text or "")
+    m = re.search(r"\b\d{7,9}\b", text_clean)
+    return m.group(0) if m else None
+
+# ===== Fechas =====
+
+_DATE_RE = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b")
+
+def parse_fecha(text: str) -> Optional[date]:
+    if not text:
+        return None
+    m = _DATE_RE.search(text)
+    if not m:
+        return None
+    d, mth, y = m.groups()
+    y = int(y)
+    if y < 100:
+        y += 1900 if y > 30 else 2000
+    try:
+        return date(int(y), int(mth), int(d))
+    except ValueError:
+        return None
+
+def edad_from_fecha_nacimiento(fnac: Optional[date]) -> Optional[int]:
+    if not fnac:
+        return None
+    today = date.today()
+    years = today.year - fnac.year - ((today.month, today.day) < (fnac.month, fnac.day))
+    return _clamp(years, 0, 120)
+
+# ===== Antropometría =====
+
+def parse_peso_kg(text: str) -> Optional[float]:
+    if not text:
+        return None
+    m = re.search(r"(\d+[.,]?\d*)\s*(kg|kil|kilos|kilogramos)?\b", text, flags=re.I)
+    val = _to_float(m.group(1)) if m else None
+    return _clamp(val, 25.0, 300.0)
+
+def parse_talla_cm(text: str) -> Optional[float]:
+    if not text:
+        return None
+    # acepta "1.72 m", "172", "172cm", "1,72"
+    m_m = re.search(r"(\d+[.,]?\d*)\s*m\b", text, flags=re.I)
+    if m_m:
+        meters = _to_float(m_m.group(1))
+        if meters is not None:
+            return _clamp(meters * 100.0, 100.0, 230.0)
+    m_cm = re.search(r"\b(\d{2,3})(?:\s*cm)?\b", text, flags=re.I)
+    if m_cm:
+        cm = _to_float(m_cm.group(1))
+        return _clamp(cm, 100.0, 230.0)
+    return None
+
+def calc_imc(peso_kg: Optional[float], talla_cm: Optional[float]) -> Optional[float]:
+    if peso_kg is None or talla_cm is None:
+        return None
+    m = talla_cm / 100.0
+    if m <= 0:
+        return None
+    imc = peso_kg / (m * m)
+    return _clamp(round(imc, 1), 10.0, 80.0)
+
+# ===== Cobertura =====
+
+def parse_afiliado(text: str) -> Optional[str]:
+    if not text:
+        return None
+    m = re.search(r"\b([A-Z0-9]{4,})\b", text, flags=re.I)
+    return m.group(1) if m else None
+
+# ===== Sustancias =====
+
+def parse_tabaco(text: str) -> Tuple[Optional[bool], Optional[float], Optional[float]]:
+    if not text:
+        return None, None, None
+    t = text.lower()
+    if any(k in t for k in ["no fuma", "no fum", "niega tabaco"]):
+        return False, None, None
+    if any(k in t for k in ["fuma", "tabaco", "cigarr"]):
+        # paquetes/día
+        m = re.search(r"(\d+[.,]?\d*)\s*(pack|paquete|paq).{0,12}(dia|día)", t)
+        paquetes = _to_float(m.group(1)) if m else None
+        # años-paquete (si aparece)
+        m2 = re.search(r"(\d+[.,]?\d*)\s*(años|anos).{0,8}(paq)", t)
+        ap = _to_float(m2.group(1)) if m2 else None
+        return True, paquetes, ap
+    return None, None, None
+
+def parse_alcohol(text: str) -> Tuple[Optional[bool], Optional[float]]:
+    if not text:
+        return None, None
+    t = text.lower()
+    if any(k in t for k in ["no bebe", "no toma", "niega alcohol"]):
+        return False, None
+    if any(k in t for k in ["bebe", "toma", "alcohol"]):
+        m = re.search(r"(\d+[.,]?\d*)\s*(tragos|unidades|bebidas).{0,12}(semana)", t)
+        ts = _to_float(m.group(1)) if m else None
+        return True, ts
+    return None, None
+
+def parse_via_aerea(text: str):
+    t = (text or "").lower()
+    return {
+        "intubacion_dificil": True if "intub" in t and "dific" in t else (False if "sin dificultad" in t else None),
+        "piezas_flojas": True if any(k in t for k in ["diente flojo", "pieza floja"]) else (False if "sin piezas flojas" in t else None),
+        "protesis": True if "prótesis" in t or "protesis" in t else (False if "sin prótesis" in t else None),
+    }
+
+# ===== Complementarios: rangos muy básicos =====
+
+def hb_en_rango(x: Optional[float]) -> bool:
+    return x is None or (2.0 <= x <= 22.0)
+
+def plaquetas_en_rango(x: Optional[int]) -> bool:
+    return x is None or (5_000 <= x <= 1_200_000)
+
+def creatinina_en_rango(x: Optional[float]) -> bool:
+    return x is None or (0.2 <= x <= 15.0)
+
+def inr_en_rango(x: Optional[float]) -> bool:
+    return x is None or (0.5 <= x <= 8.0)

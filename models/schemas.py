@@ -1,83 +1,143 @@
+# schemas.py
+from typing import List, Optional, Dict
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
-from datetime import datetime
-from enum import Enum
+from datetime import date, datetime
 
-class OrderStatus(str, Enum):
-    PENDING = "pending"
-    CONFIRMED = "confirmed"
-    IN_PREPARATION = "in_preparation"
-    READY = "ready"
-    DELIVERED = "delivered"
-    CANCELLED = "cancelled"
+# ===== Bloques =====
 
-# Modelo para activar/desactivar takeover humano
-class TakeoverRequest(BaseModel):
-    """Request model for activating/deactivating human takeover."""
-    customer_phone: str
-    activate: bool = True
+class Datos(BaseModel):
+    nombre_completo: Optional[str] = None
+    fecha_nacimiento: Optional[date] = None
+    edad: Optional[int] = None
+    fecha_evaluacion: Optional[date] = None
 
+class Antropometria(BaseModel):
+    peso_kg: Optional[float] = None
+    talla_cm: Optional[float] = None
+    imc: Optional[float] = None
+    asa: Optional[str] = None  # se deja manual
 
-# Modelo para enviar mensajes manualmente como negocio
-class MessageRequest(BaseModel):
-    """Request model for sending manual messages as a business."""
-    to: str  # WhatsApp format destination number
-    message: str
+class Cobertura(BaseModel):
+    obra_social: Optional[str] = None
+    afiliado: Optional[str] = None
+    motivo_cirugia: Optional[str] = None
 
-class MenuItem(BaseModel):
-    id: str
-    name: str
-    description: str
-    price: float
-    category: str
-    available: bool = True
-    image_url: Optional[str] = None
+class AlergiaItem(BaseModel):
+    sustancia: str
+    reaccion: Optional[str] = None
 
-class CustomerProfile(BaseModel):
-    phone: str
-    name: Optional[str] = None
-    address: Optional[str] = None
-    last_interaction: Optional[datetime] = None
-    preferred_language: str = "es"
-    
-class OrderItem(BaseModel):
-    menu_item_id: str
-    quantity: int = Field(gt=0)
-    special_instructions: Optional[str] = None
-    
-class Order(BaseModel):
-    id: str
-    customer_phone: str
-    items: List[OrderItem]
-    total_amount: float
-    status: OrderStatus = OrderStatus.PENDING
-    created_at: datetime
-    updated_at: datetime
-    delivery_address: Optional[str] = None
-    special_instructions: Optional[str] = None
+class Alergias(BaseModel):
+    tiene_alergias: bool
+    detalle: List[AlergiaItem] = Field(default_factory=list)
 
-class ConversationMessage(BaseModel):
-    """Model for individual messages in a conversation."""
-    role: str  # 'user' or 'assistant'
-    content: str
-    timestamp: float
+class MedicacionItem(BaseModel):
+    droga: str
+    dosis: Optional[str] = None
+    frecuencia: Optional[str] = None
 
-class ConversationData(BaseModel):
-    """Model for conversation data stored in files."""
-    phone_number: str
-    name: str = ""
-    last_updated: float
-    history: List[ConversationMessage]
+class AlergiaMedicacion(BaseModel):
+    alergias: Alergias
+    medicacion_habitual: List[MedicacionItem] = Field(default_factory=list)
 
-class ConversationContext(BaseModel):
-    """Model for tracking conversation state and context."""
-    customer_phone: str
-    last_intent: Optional[str] = None
-    current_order_id: Optional[str] = None
-    last_message_timestamp: Optional[datetime] = None
-    human_takeover: bool = False
-    
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.timestamp() if v else None
-        }
+class Cardio(BaseModel):
+    hta: Optional[bool] = None
+    iam: Optional[bool] = None
+    falla_card: Optional[bool] = None
+    otros: List[str] = Field(default_factory=list)
+
+class Respiratorio(BaseModel):
+    epoc: Optional[bool] = None
+    asma: Optional[bool] = None
+    apnea_sueño: Optional[bool] = None
+    otros: List[str] = Field(default_factory=list)
+
+class Endocrino(BaseModel):
+    dm: Optional[bool] = None
+    hipotiroidismo: Optional[bool] = None
+    hipertiroidismo: Optional[bool] = None
+    otros: List[str] = Field(default_factory=list)
+
+class Renal(BaseModel):
+    irc: Optional[bool] = None
+    dialisis: Optional[bool] = None
+    otros: List[str] = Field(default_factory=list)
+
+class Neuro(BaseModel):
+    acv: Optional[bool] = None
+    convulsiones: Optional[bool] = None
+    otros: List[str] = Field(default_factory=list)
+
+class Antecedentes(BaseModel):
+    cardio: Optional[Cardio] = None
+    respiratorio: Optional[Respiratorio] = None
+    endocrino: Optional[Endocrino] = None
+    renal: Optional[Renal] = None
+    neuro: Optional[Neuro] = None
+    otros: List[str] = Field(default_factory=list)
+
+class LabOtro(BaseModel):
+    nombre: str
+    valor: str
+
+class ImagenItem(BaseModel):
+    estudio: str
+    hallazgo: Optional[str] = None
+
+class Labs(BaseModel):
+    hb: Optional[float] = None
+    plaquetas: Optional[int] = None
+    creatinina: Optional[float] = None
+    inr: Optional[float] = None
+    otros: List[LabOtro] = Field(default_factory=list)
+
+class Complementarios(BaseModel):
+    labs: Labs = Field(default_factory=Labs)
+    imagenes: List[ImagenItem] = Field(default_factory=list)
+
+class Tabaquismo(BaseModel):
+    consume: Optional[bool] = None
+    paquetes_dia: Optional[float] = None
+    anos_paquete: Optional[float] = None
+    ultimo_consumo: Optional[str] = None
+
+class Alcohol(BaseModel):
+    consume: Optional[bool] = None
+    tragos_semana: Optional[float] = None
+
+class OtrasSustancias(BaseModel):
+    consume: Optional[bool] = None
+    detalle: List[str] = Field(default_factory=list)
+
+class Sustancias(BaseModel):
+    tabaco: Tabaquismo = Field(default_factory=Tabaquismo)
+    alcohol: Alcohol = Field(default_factory=Alcohol)
+    otras: OtrasSustancias = Field(default_factory=OtrasSustancias)
+
+class ViaAerea(BaseModel):
+    intubacion_dificil: Optional[bool] = None
+    piezas_flojas: Optional[bool] = None
+    protesis: Optional[bool] = None
+    otros: List[str] = Field(default_factory=list)
+
+# ===== Ficha completa =====
+
+class FichaPreanestesia(BaseModel):
+    dni: Optional[str] = None
+    datos: Datos = Field(default_factory=Datos)
+    antropometria: Antropometria = Field(default_factory=Antropometria)
+    cobertura: Cobertura = Field(default_factory=Cobertura)
+    alergia_medicacion: Optional[AlergiaMedicacion] = None
+    antecedentes: Optional[Antecedentes] = None
+    complementarios: Complementarios = Field(default_factory=Complementarios)
+    sustancias: Sustancias = Field(default_factory=Sustancias)
+    via_aerea: ViaAerea = Field(default_factory=ViaAerea)
+
+# ===== Estado de conversación =====
+
+class ConversationState(BaseModel):
+    user_id: str
+    module_idx: int = 0
+    ficha: FichaPreanestesia = Field(default_factory=FichaPreanestesia)
+    trace: Dict[str, Dict[str, str]] = Field(default_factory=dict)  # module.field -> raw text
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
