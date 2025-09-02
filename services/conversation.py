@@ -61,25 +61,34 @@ class ConversationService:
     # Conversation STAGES
     # -----------------------------
     
-    class ConversationService:
-        def __init__(self):
-            self._stages: dict[str, str] = {}
-            self._phone_to_key: dict[str, str] = {}
 
-        def get_stage(self, phone: str) -> str | None:
-            return self._stages.get(phone)
+    def __init__(self):
+        self._stages: dict[str, str] = {}
+        self._phone_to_key: dict[str, str] = {}
 
-        def set_stage(self, phone: str, stage: str) -> None:
-            self._stages[phone] = stage
+    def get_stage(self, phone: str) -> str | None:
+        return self._stages.get(phone)
 
-        def set_user_key(self, phone: str, key: str) -> None:
-            self._phone_to_key[phone] = key
+    def set_stage(self, phone: str, stage: str) -> None:
+        self._stages[phone] = stage
 
-        def get_user_key(self, phone: str) -> str | None:
-            return self._phone_to_key.get(phone)
+    def set_user_key(self, phone: str, key: str) -> None:
+        self._phone_to_key[phone] = key
 
-        def has_history(self, key: str) -> bool:
-            return key in self._histories and len(self._histories[key]) > 0
+    def get_user_key(self, phone: str) -> str | None:
+        return self._phone_to_key.get(phone)
+
+    def has_history(self, key: str) -> bool:
+        """Revisa si existe un archivo de historial con contenido para este key (teléfono o DNI)."""
+        path = os.path.join(self._base_path, f"{key}.json")
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return bool(data)  # True si hay algo en el JSON
+        except Exception:
+            return False
 
 
     
