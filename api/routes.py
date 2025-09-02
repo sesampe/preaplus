@@ -153,6 +153,7 @@ class WhatsAppRouter:
             user_name = profile_info.get("name")
             
             # Saludo solo si es conversación nueva
+            sender_phone = "542616463629"
             if not conversation_service.get_conversation_history(sender_phone):
                 self.wa_client.send_message(
                     "¡Hola! Soy tu médico anestesiólogo y voy a realizarte unas preguntas para completar tu ficha anestesiológica:",
