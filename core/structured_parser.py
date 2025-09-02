@@ -69,7 +69,8 @@ def _call_llm_structured(user_text: str) -> FichaPreanestesia:
             temperature=0,
         )
         # Devuelve instancia Pydantic ya validada
-        return parsed.parsed
+        # debe ser:
+        return parsed.output_parsed
     except Exception as e:
         log.warning("Responses.parse falló, uso fallback JSON-mode. Error: %s", e)
 
