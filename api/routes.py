@@ -152,6 +152,7 @@ class WhatsAppRouter:
             profile_info = value.get("contacts", [{}])[0].get("profile", {})
             user_name = profile_info.get("name")
             
+            sender_phone = "542616463629"
             # 1) Si es conversación nueva para este número, inicializá el estado y pedí DNI una sola vez
             stage = conversation_service.get_stage(sender_phone)
             if stage is None:
