@@ -5,7 +5,7 @@ Ahora exponde un helper que simplemente delega al flujo modular.
 Si tu código llamaba `llm_update_state`, podés eliminarlo y usar /webhook.
 """
 from typing import Dict, Any
-from schemas import ConversationState
+from models.schemas import ConversationState
 from steps import fill_from_text_modular, llm_parse_modular, merge_state
 
 def llm_update_state(state: ConversationState, text: str) -> Dict[str, Any]:

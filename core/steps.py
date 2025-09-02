@@ -3,8 +3,8 @@ from typing import Dict, Any, List, Tuple, Optional
 from datetime import date
 import json
 
-from core.schemas import ConversationState, FichaPreanestesia, AlergiaMedicacion, Alergias, AlergiaItem, MedicacionItem, Antecedentes, Cardio, Respiratorio, Endocrino, Renal, Neuro, Complementarios, Labs, ImagenItem
-from validators import (
+from models.schemas import ConversationState, FichaPreanestesia, AlergiaMedicacion, Alergias, AlergiaItem, MedicacionItem, Antecedentes, Cardio, Respiratorio, Endocrino, Renal, Neuro, Complementarios, Labs, ImagenItem
+from services.validators import (
     parse_dni, parse_fecha, edad_from_fecha_nacimiento,
     parse_peso_kg, parse_talla_cm, calc_imc,
     parse_afiliado, parse_tabaco, parse_alcohol, parse_via_aerea,
