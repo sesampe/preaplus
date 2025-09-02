@@ -80,14 +80,14 @@ class WhatsAppRouter:
         Normaliza el DNI quitando espacios, puntos y pasando a mayúsculas.
         Devuelve el DNI normalizado si es válido, o None si no lo es.
         """
-        dni = (
+        dni_valido = (
             message.replace(" ", "")   # quita espacios
                 .replace(".", "")   # quita puntos
                 .upper()            # mayúsculas
         )
 
-        if 6 <= len(dni) <= 12:   # rango flexible para DNI o pasaporte
-            return True
+        if 6 <= len(dni_valido) <= 12:   # rango flexible para DNI o pasaporte
+            return dni_valido
         return False
     
     #async def _handle_new_user(self, sender_phone: str, user_name: str) -> str: #analiza si es nuevo paciente o no, para ver como lo saluda.
@@ -159,20 +159,20 @@ class WhatsAppRouter:
             profile_info = value.get("contacts", [{}])[0].get("profile", {})
             user_name = profile_info.get("name")
             
-            saludo = await self._handle_new_user(sender_phone, user_name)
+            saludo = "Hola! Soy tu medico anestesiologo y voy a realizarte unas preguntas para completar tu ficha anestesiologica:"
             if saludo:
                 sender_phone = '542616463629'
                 self.wa_client.send_message(saludo, sender_phone)
                 self.wa_client.send_message('PARA INICIAR, INGRESE SU DNI:', sender_phone)
-                conversation_service.add_to_conversation_history(sender_phone, "assistant", saludo)
-
+            
             # Cambia nombre del json por el DNI del paciente.
-            dni_valido = await self.is_valid_dni(user_message)
-            if dni_valido == True:
-                conversation_service.rename_conversation_file(sender_phone, user_message)
-                self.log.debug(f"JSON cambiado de nombre a: {user_message}")
-                if dni_valido == False:
-                    self.wa_client.send_message('POR FAVOR, INGRESE DNI VALIDO:', sender_phone)
+            dni = await self.is_valid_dni(user_message)
+            if dni:
+                conversation_service.rename_conversation_file(sender_phone, dni)
+                self.log.debug(f"JSON cambiado de nombre a: {dni}")
+            if dni == False:
+                self.wa_client.send_message('POR FAVOR, INGRESE DNI VALIDO:', sender_phone)
+                return
             
 
             # Try to extract name if not known 
@@ -225,19 +225,19 @@ class WhatsAppRouter:
 
             # Get AI response 
             try:
-                self.log.info(f"🧠 Consultando modelo IA para {sender_phone}")
+                self.log.info(f"🧠 Consultando modelo IA para {dni}")
                 self.log.info(f"📤 Enviando respuesta a {sender_phone}")
                 self.log.info(f"📤 OWNER PHONE NUMBER: {OWNER_PHONE_NUMBER}")
                 response_text = await get_llm_response(      #(ACA LE MANDA LO QUE SE VIENE HABLANDO A LA IA)
                     user_message,                           #literal lo que me puso el paciente
-                    conversation_service.get_conversation_history(sender_phone)  #y lo que se viene hablando
+                    conversation_service.get_conversation_history(dni)  #y lo que se viene hablando
                 )
             except Exception as e:
                 self.log.error(f"⚠️ Error consultando IA: {e}")
                 response_text = "Estamos experimentando dificultades. ¿Querés que te conecte con una persona?"
 
             # Send response #(ANOTA EN EL HISTORIAL LO QUE EL BOT LE RESPONDIO Y LE MANDA EL MENSAJE AL PACIENTE)
-            conversation_service.add_to_conversation_history(sender_phone, "assistant", response_text)
+            conversation_service.add_to_conversation_history(dni, "assistant", response_text)
             self.wa_client.send_message(response_text, sender_phone)
 
             return {"status": "responded"}, 200
