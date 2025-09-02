@@ -1,20 +1,28 @@
-# settings.py
+# /app/core/settings.py
+from __future__ import annotations
 import os
-from typing import Optional
+from pathlib import Path
 
-class Settings:
-    ENV: str = os.getenv("ENV", "dev")
+# Raíz del proyecto
+BASE_DIR = Path(__file__).resolve().parent.parent
 
-    # LLM
-    OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
-    LLM_API_BASE: str = os.getenv("LLM_API_BASE", "https://api.openai.com/v1")
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-4o-mini")
-    LLM_HTTP_TIMEOUT: float = float(os.getenv("LLM_HTTP_TIMEOUT", "12.0"))
-    LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "2"))
-    LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+# Carpeta base de datos/archivos (puedes sobreescribir con env var)
+DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Server
-    PORT: int = int(os.getenv("PORT", "8000"))
-    
+# Directorio donde se guarda el historial de conversaciones
+CONVERSATION_HISTORY_DIR = Path(
+    os.getenv("CONVERSATION_HISTORY_DIR", DATA_DIR / "conversations")
+)
+CONVERSATION_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
-settings = Settings()
+# Archivo “flag” para takeover (si tu servicio lo usa)
+TAKEOVER_FILE = Path(os.getenv("TAKEOVER_FILE", DATA_DIR / "takeover.flag"))
+
+# (opcional) expórtalo explícitamente
+__all__ = [
+    "BASE_DIR",
+    "DATA_DIR",
+    "CONVERSATION_HISTORY_DIR",
+    "TAKEOVER_FILE",
+]
