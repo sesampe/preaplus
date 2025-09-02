@@ -57,6 +57,10 @@ class LLMClient:
         self.max_retries = 5
         self._initialized = True
 
+        self.log.info(f"SYSTEM_PROMPT len={len(SYSTEM_PROMPT)}")
+        self.log.debug(f"Preview prompt: {SYSTEM_PROMPT[:200]}")
+
+
     # ABRE UN "TELEFONO" Y ENVIA EL JSON + SE FIJA SI HAY ERROR. TRADUCE LO QUE RESPONDE EL LLMClient A FORMATO JSON.
     async def _make_http_request(self, url: str, headers: Dict[str, str], json_data: Dict[str, Any]) -> Dict[str, Any]:
         """Hace un POST HTTP con manejo de timeout y devuelve el JSON."""
