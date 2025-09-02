@@ -1,16 +1,27 @@
 # routes.py
-from fastapi import FastAPI, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from typing import Dict, Any, Tuple
 from datetime import datetime
+
 from core.settings import settings
 from models.schemas import ConversationState
-from core.steps import fill_from_text_modular, llm_parse_modular, advance_module, merge_state, summarize_patch_for_confirmation, MODULES, prompt_for_module
+from core.steps import (
+    fill_from_text_modular,
+    llm_parse_modular,
+    advance_module,
+    merge_state,
+    summarize_patch_for_confirmation,
+    MODULES,
+    prompt_for_module,
+)
 
-app = FastAPI(title="Preanestesia")
+# En lugar de FastAPI, usamos APIRouter para ser incluido desde main.py
+router = APIRouter()
 
 # ====== Almacenamiento en memoria (cambiá por Redis/DB en prod) ======
 _USER_STATE: Dict[str, ConversationState] = {}
+
 
 def load_state(user_id: str) -> ConversationState:
     st = _USER_STATE.get(user_id)
@@ -19,9 +30,11 @@ def load_state(user_id: str) -> ConversationState:
         _USER_STATE[user_id] = st
     return st
 
+
 def save_state(state: ConversationState):
     state.updated_at = datetime.utcnow()
     _USER_STATE[state.user_id] = state
+
 
 def _infer_user_id(payload: Dict[str, Any]) -> str:
     # intenta varias claves comunes de WhatsApp providers
@@ -34,8 +47,8 @@ def _infer_user_id(payload: Dict[str, Any]) -> str:
     # fallback: una sesión única por IP (no ideal)
     return "anon"
 
-# ====== Core TRIAGE ======
 
+# ====== Core TRIAGE ======
 def _triage_block(state: ConversationState, text: str) -> Tuple[str, ConversationState]:
     """Procesa el texto en el módulo actual, con parsers locales y fallback LLM según aplique."""
     module_idx = state.module_idx
@@ -48,6 +61,7 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[str, Conversatio
     if MODULES[module_idx]["required"]:
         missing = len([m for m in MODULES[module_idx]["required"] if m]) > 0 and False  # no nos sirve así
         # Recalcular missing de verdad sobre el estado ya mergeado:
+
     # Simple recheck: si el módulo usa LLM y el estado no tiene el nodo completo:
     needs_llm = MODULES[module_idx]["use_llm"]
     did_llm = False
@@ -72,16 +86,15 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[str, Conversatio
         reply = f"{confirm}. ¿Falta algo de este bloque? Si no, sigamos. {next_prompt}"
     return reply, state
 
-# ====== HTTP ======
 
-@app.post("/webhook")
+# ====== HTTP ======
+@router.post("/webhook")
 async def webhook(req: Request):
     payload = await req.json()
     text = payload.get("text") or payload.get("message") or ""
 
     user_id = "542616463629"
-    #user_id = _infer_user_id(payload)
-    
+    # user_id = _infer_user_id(payload)
 
     state = load_state(user_id)
     reply, state = _triage_block(state, text)
@@ -89,6 +102,7 @@ async def webhook(req: Request):
 
     return JSONResponse({"to": user_id, "reply": reply, "module": MODULES[state.module_idx]["name"]})
 
-@app.get("/health")
+
+@router.get("/health")
 def health():
     return {"ok": True}
