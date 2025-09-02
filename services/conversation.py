@@ -1,8 +1,6 @@
 import os
-import re
 import json
-import time 
-
+import time
 
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -10,8 +8,6 @@ from datetime import datetime
 from core.settings import CONVERSATION_HISTORY_DIR, TAKEOVER_FILE
 from core.logger import LoggerManager
 from models.schemas import ConversationContext
-
-
 
 class ConversationService:
     """Service for managing conversations, customer profiles, and interaction contexts.
@@ -59,10 +55,19 @@ class ConversationService:
         """Get the file path for a conversation."""
         filename = self._sanitize_phone(phone_number) + ".json"
         return os.path.join(CONVERSATION_HISTORY_DIR, filename)
-
+    
     # -----------------------------
     # Conversation Context Management
     # -----------------------------
+
+    def rename_conversation_file(self, old_phone: str, dni: str) -> str:
+        old_path = self._get_conversation_filepath(old_phone)
+        new_path = os.path.join(CONVERSATION_HISTORY_DIR, f"{dni}.json")
+        if os.path.exists(old_path):
+            os.rename(old_path, new_path)
+            self.log.info(f"📂 Archivo de conversación renombrado: {old_path} → {new_path}")
+        return new_path
+    
     def get_conversation_context(self, phone: str) -> ConversationContext:
         """Get or create conversation context for a customer.
         
