@@ -1,7 +1,7 @@
-# routes.py
+# api/routes.py
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 from datetime import datetime
 
 from core.settings import HEYOO_PHONE_ID, HEYOO_TOKEN
@@ -20,28 +20,77 @@ from core.steps import (
 
 router = APIRouter()
 
-# Cliente WhatsApp
 wa_client = WhatsApp(token=HEYOO_TOKEN, phone_number_id=HEYOO_PHONE_ID)
 
 # Hardcodeá tu número acá
 HARDCODED_USER_ID = "542616463629"
 
-# ====== Almacenamiento en memoria ======
+# ====== Memoria simple ======
 _USER_STATE: Dict[str, ConversationState] = {}
 
 def load_state(user_id: str) -> ConversationState:
     st = _USER_STATE.get(user_id)
     if st is None:
         st = ConversationState(user_id=user_id)
+        # Campos auxiliares para control de duplicados y spam
+        st._handled_msg_ids = set()          # ids ya procesados (WhatsApp message.id)
+        st._last_text = ""                    # último texto que vimos
+        st._last_failed_module = None         # módulo en el que dijimos “No pude…” por última vez
         _USER_STATE[user_id] = st
+    # compatibilidad si venís de un estado viejo
+    if not hasattr(st, "_handled_msg_ids"):
+        st._handled_msg_ids = set()
+    if not hasattr(st, "_last_text"):
+        st._last_text = ""
+    if not hasattr(st, "_last_failed_module"):
+        st._last_failed_module = None
     return st
 
 def save_state(state: ConversationState):
     state.updated_at = datetime.utcnow()
     _USER_STATE[state.user_id] = state
 
+# ====== Helpers ======
+
+def _extract_incoming(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    """
+    Devuelve (text, message_id) o ("__IGNORE__", None) si no hay que responder.
+    - Ignora 'statuses' (entregado/leído).
+    - Solo procesa mensajes de tipo 'text'.
+    """
+    try:
+        entry = payload.get("entry", [])[0]
+        change = entry.get("changes", [])[0]
+        value = change.get("value", {})
+
+        # 1) Eventos de status -> ignorar
+        if value.get("statuses"):
+            return "__IGNORE__", None
+
+        # 2) Mensajes entrantes (solo text)
+        msgs = value.get("messages") or []
+        if msgs:
+            msg = msgs[0]
+            msg_type = msg.get("type")
+            msg_id = msg.get("id")
+            if msg_type == "text":
+                body = (msg.get("text", {}) or {}).get("body", "") or ""
+                return body, msg_id
+            else:
+                # otros tipos (image, button, interactive...) no los manejamos por ahora
+                return "__IGNORE__", msg_id
+    except Exception:
+        pass
+
+    # Variantes de test locales
+    text = payload.get("text") or payload.get("message") or payload.get("body") or ""
+    mid = payload.get("message_id")
+    if not text:
+        return "__IGNORE__", mid
+    return text, mid
+
 # ====== Core TRIAGE ======
-def _triage_block(state: ConversationState, text: str) -> Tuple[str, ConversationState]:
+def _triage_block(state: ConversationState, text: str) -> Tuple[Optional[str], ConversationState]:
     module_idx = state.module_idx
 
     # 1) Patch local
@@ -50,30 +99,34 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[str, Conversatio
         state = merge_state(state, {"ficha": patch_local.get("ficha", patch_local)})
 
     # 2) Patch LLM (si el módulo lo usa)
-    patch_llm = {}
+    patch_llm: Dict[str, Any] = {}
     if MODULES[module_idx]["use_llm"]:
         patch_llm = llm_parse_modular(text or "", module_idx) or {}
         if patch_llm:
             state = merge_state(state, {"ficha": patch_llm.get("ficha", patch_llm)})
 
-    # 3) Confirmación usando el patch combinado
+    # 3) Confirmación
     combined = {"ficha": {}}
-    if patch_local and patch_local.get("ficha"):
-        combined["ficha"].update(patch_local["ficha"])
-    if patch_llm and patch_llm.get("ficha"):
-        combined["ficha"].update(patch_llm["ficha"])
+    if patch_local:
+        combined["ficha"].update(patch_local.get("ficha", patch_local))
+    if patch_llm:
+        combined["ficha"].update(patch_llm.get("ficha", patch_llm))
 
-    had_any = bool(combined.get("ficha"))
-    confirm = (
-        summarize_patch_for_confirmation(combined, module_idx)
-        if had_any
-        else "No pude extraer datos de este bloque."
-    )
+    had_any = bool(combined["ficha"])
+    if had_any:
+        confirm = summarize_patch_for_confirmation(combined, module_idx)
+    else:
+        confirm = "No pude extraer datos de este bloque."
 
-    # 4) Avance: solo si hubo algo que anotar
+    # 4) Avance: solo si hubo algo
     if had_any:
         state.module_idx = min(state.module_idx + 1, len(MODULES) - 1)
+        state._last_failed_module = None  # reseteamos “fallo”
+    else:
+        # Marcamos que este módulo falló para poder evitar spam si el texto no cambia
+        state._last_failed_module = module_idx
 
+    # 5) Siguiente prompt
     next_idx, next_prompt = advance_module(state)
     if next_idx is None:
         reply = f"{confirm} ¡Listo! Completamos todos los bloques."
@@ -87,38 +140,40 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[str, Conversatio
 async def webhook(req: Request):
     payload = await req.json()
 
-    # Intentá extraer texto desde distintos formatos
-    text = (
-        payload.get("text")
-        or payload.get("message")
-        or payload.get("body")
-    )
-    if not text and "messages" in payload:
-        msgs = payload["messages"]
-        if isinstance(msgs, list) and msgs and "text" in msgs[0]:
-            text = msgs[0]["text"].get("body")
-    # Formato oficial de Meta (WhatsApp Cloud)
-    if not text:
-        try:
-            msg = payload["entry"][0]["changes"][0]["value"]["messages"][0]
-            if msg.get("type") == "text":
-                text = msg["text"]["body"]
-        except Exception:
-            text = ""
+    text, message_id = _extract_incoming(payload)
+
+    # Ignorar eventos sin texto o de estado / tipos no soportados
+    if text == "__IGNORE__":
+        return JSONResponse({"ok": True, "ignored": "non_text_or_status"})
 
     # Siempre usar el hardcode
     user_id = HARDCODED_USER_ID
-
     state = load_state(user_id)
-    reply, state = _triage_block(state, text or "")
-    save_state(state)
 
-    # Enviar por WhatsApp
-    try:
-        wa_client.send_message(message=reply, recipient_id=user_id)
-        sent = True
-    except Exception:
-        sent = False
+    # --- Desduplicación por message_id ---
+    if message_id and message_id in state._handled_msg_ids:
+        return JSONResponse({"ok": True, "ignored": "duplicate_message"})
+    if message_id:
+        state._handled_msg_ids.add(message_id)
+
+    # --- Anti-spam “No pude…” ---
+    # Si el texto es idéntico al anterior, y el último intento ya falló en este módulo,
+    # no volvemos a responder (evita el bucle si Meta reintenta con el mismo payload).
+    if text == state._last_text and state._last_failed_module == state.module_idx:
+        return JSONResponse({"ok": True, "ignored": "same_text_same_module"})
+
+    reply, state = _triage_block(state, text)
+    save_state(state)
+    state._last_text = text  # actualizar último texto
+
+    # Enviar por WhatsApp (solo si hay reply no vacío)
+    sent = False
+    if reply:
+        try:
+            wa_client.send_message(message=reply, recipient_id=user_id)
+            sent = True
+        except Exception:
+            sent = False
 
     return JSONResponse({
         "to": user_id,
