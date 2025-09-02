@@ -1,75 +1,58 @@
-# core/logger.py
-import os
-import sys
+# /app/core/logger.py
 import logging
 from logging.handlers import RotatingFileHandler
+import sys
+from pathlib import Path
 
-# Importá settings para loguear el system prompt
-from core import settings
+__all__ = ["LoggerManager"]  # <-- asegura que se exporte
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-LOG_FILE = os.getenv("LOG_FILE", "logs/app.log")
-LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+class LoggerManager:
+    """
+    Crea loggers con formateo consistente.
+    Uso:
+        log = LoggerManager(name="preanestesia", level="INFO", log_to_file=False).get_logger()
+    """
+    LEVELS = {
+        "CRITICAL": logging.CRITICAL,
+        "ERROR": logging.ERROR,
+        "WARNING": logging.WARNING,
+        "INFO": logging.INFO,
+        "DEBUG": logging.DEBUG,
+    }
 
+    def __init__(self, name: str = "app", level: str = "INFO", log_to_file: bool = False, file_name: str = "app.log"):
+        self.name = name
+        self.level = self.LEVELS.get(level.upper(), logging.INFO)
+        self.log_to_file = log_to_file
+        self.file_name = file_name
 
-def _build_handlers():
-    handlers = []
+    def get_logger(self) -> logging.Logger:
+        logger = logging.getLogger(self.name)
+        if logger.handlers:
+            # Ya inicializado
+            logger.setLevel(self.level)
+            return logger
 
-    # Console
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(LOG_LEVEL)
-    ch.setFormatter(logging.Formatter(LOG_FORMAT))
-    handlers.append(ch)
-
-    # File (rotativo)
-    if LOG_FILE:
-        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-        fh = RotatingFileHandler(
-            LOG_FILE, maxBytes=2_000_000, backupCount=3, encoding="utf-8"
+        logger.setLevel(self.level)
+        formatter = logging.Formatter(
+            fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
-        fh.setLevel(LOG_LEVEL)
-        fh.setFormatter(logging.Formatter(LOG_FORMAT))
-        handlers.append(fh)
 
-    return handlers
+        # Consola
+        sh = logging.StreamHandler(sys.stdout)
+        sh.setLevel(self.level)
+        sh.setFormatter(formatter)
+        logger.addHandler(sh)
 
+        # Archivo (opcional, sin depender de settings para evitar bucles)
+        if self.log_to_file:
+            logs_dir = Path("/app/logs")
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            fh = RotatingFileHandler(logs_dir / self.file_name, maxBytes=2_000_000, backupCount=3)
+            fh.setLevel(self.level)
+            fh.setFormatter(formatter)
+            logger.addHandler(fh)
 
-def setup_logging():
-    """
-    Configura logging global y loguea temprano el estado del SYSTEM_PROMPT.
-    Llamar esto APENAS arranca la app (antes de crear clientes LLM).
-    """
-    # force=True para reemplazar configuraciones previas (útil en entornos que ya tocan logging)
-    logging.basicConfig(level=LOG_LEVEL, handlers=_build_handlers(), force=True)
-
-    log = logging.getLogger("preanestesia")
-
-    # --- Logueo temprano del SYSTEM_PROMPT ---
-    try:
-        sp_len = len(settings.SYSTEM_PROMPT or "")
-        log.info(f"SYSTEM_PROMPT len={sp_len}")
-
-        # Si usás archivo, mostrás la ruta (si está disponible en settings)
-        sp_file = getattr(settings, "SYSTEM_PROMPT_FILE", None)
-        if sp_file:
-            log.info(f"SYSTEM_PROMPT_FILE={sp_file}")
-
-        if sp_len == 0:
-            log.warning(
-                "SYSTEM_PROMPT vacío. Revisar SYSTEM_PROMPT_FILE / SYSTEM_PROMPT / encoding UTF-8."
-            )
-    except Exception as e:
-        log.exception("No se pudo loguear SYSTEM_PROMPT: %s", e)
-
-    return log
-
-
-def get_logger(name: str = "preanestesia"):
-    """
-    Obtiene un logger con la configuración global asegurada.
-    """
-    root = logging.getLogger()
-    if not root.handlers:
-        # Si alguien importó este módulo sin llamar setup_logging(), garantizamos config mínima
-        setup_logging()
-    return logging.getLogger(name)
+        logger.propagate = False
+        return logger
