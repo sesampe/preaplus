@@ -76,19 +76,12 @@ class WhatsAppRouter:
         return message_entry["text"]["body"]
     
     async def is_valid_dni(self, message: str) -> str | None:
-        """
-        Normaliza el DNI quitando espacios, puntos y pasando a mayúsculas.
-        Devuelve el DNI normalizado si es válido, o None si no lo es.
-        """
-        dni_valido = (
-            message.replace(" ", "")   # quita espacios
-                .replace(".", "")   # quita puntos
-                .upper()            # mayúsculas
-        )
+        dni = message.replace(" ", "").replace(".", "").upper()
+        if 6 <= len(dni) <= 12:
+            return dni
+        else:
+            return None
 
-        if 6 <= len(dni_valido) <= 12:   # rango flexible para DNI o pasaporte
-            return dni_valido
-        return None
     
     #async def _handle_new_user(self, sender_phone: str, user_name: str) -> str: #analiza si es nuevo paciente o no, para ver como lo saluda.
     #    """Handle new user interaction and return appropriate greeting."""
@@ -159,87 +152,43 @@ class WhatsAppRouter:
             profile_info = value.get("contacts", [{}])[0].get("profile", {})
             user_name = profile_info.get("name")
             
-            saludo = "Hola! Soy tu medico anestesiologo y voy a realizarte unas preguntas para completar tu ficha anestesiologica:"
-            if saludo:
-                sender_phone = '542616463629'
-                self.wa_client.send_message(saludo, sender_phone)
-                self.wa_client.send_message('PARA INICIAR, INGRESE SU DNI:', sender_phone)
-            
-            # Cambia nombre del json por el DNI del paciente.
+            # Saludo solo si es conversación nueva
+            if not conversation_service.get_conversation_history(sender_phone):
+                self.wa_client.send_message(
+                    "¡Hola! Soy tu médico anestesiólogo y voy a realizarte unas preguntas para completar tu ficha anestesiológica:",
+                    sender_phone
+                )
+                self.wa_client.send_message("PARA INICIAR, INGRESE SU DNI:", sender_phone)
+
+            # Intentar leer un DNI en este mensaje
             dni = await self.is_valid_dni(user_message)
+
             if dni:
+                # Renombrar el archivo de conversación al DNI y seguir usando el DNI como key
                 conversation_service.rename_conversation_file(sender_phone, dni)
+                key = dni
                 self.log.debug(f"JSON cambiado de nombre a: {dni}")
-            if dni == None:
-                self.wa_client.send_message('POR FAVOR, INGRESE DNI VALIDO:', sender_phone)
-                return
-            
+            else:
+                # Si aún no tenemos DNI registrado para este usuario, pedirlo y cortar
+                if not conversation_service.has_conversation_key(sender_phone) and not conversation_service.has_conversation_key_for_user(sender_phone):
+                    self.wa_client.send_message("POR FAVOR, INGRESE DNI VÁLIDO:", sender_phone)
+                    return {"status": "dni_requested"}, 200
+                # Si ya lo teníamos de antes, recuperarlo
+                key = conversation_service.get_key_for_user(sender_phone)
 
-            # Try to extract name if not known 
-            #if not conversation_service.get_name_from_conversation(sender_phone):
-            #    if not saludo:
-            #        if not conversation_service.get_name_tried(sender_phone):
-            #            self.log.info(f"📝 Nombre no encontrado en conversación para {sender_phone}. Intentando extraer...")
-            #            detected_name = await extract_name_with_llm(user_message)
-            #            if detected_name:
-            #                conversation_service.set_customer_name(sender_phone, detected_name)
-            #                conversation_service.add_to_conversation_history(
-            #                    sender_phone,
-            #                    "assistant",
-            #                    f"Guardé tu nombre como {detected_name}"
-            #                )
-            #                self.log.info(f"📝 Nombre aprendido para {sender_phone}: {detected_name}")
-            #            else:
-            #                conversation_service.set_name_tried(sender_phone, True)
-            #                conversation_service.set_customer_name(sender_phone, None)
-
-            # Check for confirmation of order
-            #if llm_client.confirmar_pedido(user_message):
-            #    self.log.info(f"📝 Pedido confirmado para {sender_phone}")
-            #    self.wa_client.send_message(
-            #        "¡Gracias! Tu pedido ha sido confirmado. Nos pondremos en contacto contigo pronto.",
-            #        sender_phone
-            #    )
-            #   order_summary = await llm_client.get_order_summary(conversation_service.get_conversation_history(sender_phone))
-            #    self.log.debug(f"📝 Resumen del pedido: {order_summary}")
-            #    summary = await llm_client.get_summary_from_conversation_history(conversation_service.get_conversation_history(sender_phone))
-            #    name = conversation_service.get_name_from_conversation(sender_phone)
-            #    response_text = await llm_client.notify_owner(sender_phone, name, summary, order_summary)
-            #    conversation_service.add_to_conversation_history(sender_phone, "assistant", response_text)
-            #    conversation_service.set_order_confirmed(sender_phone, order_summary, True)
-            #    return {"status": "order_confirmed"}, 200
-
-            # Check for human takeover
-            #if llm_client.needs_human_takeover(user_message):
-            #    conversation_service.set_human_takeover(sender_phone, True)
-            #    self.log.info(f"👤 Activando human takeover para {sender_phone}")
-            #    self.wa_client.send_message(
-            #        "Una persona se contactará contigo a la brevedad. Mientras tanto puedes consultarme lo que necesites.",
-            #        sender_phone
-            #    )
-            #    summary = await llm_client.get_summary_from_conversation_history(conversation_service.get_conversation_history(sender_phone))
-            #    name = conversation_service.get_name_from_conversation(sender_phone)
-            #    response_text = await llm_client.notify_owner(sender_phone, name, summary)
-            #    conversation_service.add_to_conversation_history(sender_phone, "assistant", response_text)
-            #    return {"status": "escalated"}, 200
-
-            # Get AI response 
+            # Obtener respuesta del LLM con el historial bajo la key correcta
             try:
-                self.log.info(f"🧠 Consultando modelo IA para {dni}")
-                self.log.info(f"📤 Enviando respuesta a {sender_phone}")
-                self.log.info(f"📤 OWNER PHONE NUMBER: {OWNER_PHONE_NUMBER}")
-                response_text = await get_llm_response(      #(ACA LE MANDA LO QUE SE VIENE HABLANDO A LA IA)
-                    user_message,                           #literal lo que me puso el paciente
-                    conversation_service.get_conversation_history(dni)  #y lo que se viene hablando
+                self.log.info(f"🧠 Consultando modelo IA para key={key}")
+                response_text = await get_llm_response(
+                    user_message,
+                    conversation_service.get_conversation_history(key)
                 )
             except Exception as e:
                 self.log.error(f"⚠️ Error consultando IA: {e}")
                 response_text = "Estamos experimentando dificultades. ¿Querés que te conecte con una persona?"
 
-            # Send response #(ANOTA EN EL HISTORIAL LO QUE EL BOT LE RESPONDIO Y LE MANDA EL MENSAJE AL PACIENTE)
-            conversation_service.add_to_conversation_history(dni, "assistant", response_text)
+            conversation_service.add_to_conversation_history(key, "assistant", response_text)
             self.wa_client.send_message(response_text, sender_phone)
-
             return {"status": "responded"}, 200
 
         except Exception as e: # (SI HUBO CUALQUIER ERROR EN ESTE def, DA UN LOG PARA QUE LO VEAMOS Y AVISA A WHATSAPP ASI NO SIGUE AVISANDO)
