@@ -61,11 +61,25 @@ class ConversationService:
     # Conversation STAGES
     # -----------------------------
     
-    def get_stage(user_key: str) -> str | None: ...
-    def set_stage(user_key: str, stage: str) -> None: ...
-    def set_user_key(phone: str, key: str) -> None: ...
-    def get_user_key(phone: str) -> str | None: ...
-    def has_history(key: str) -> bool: ...
+    class ConversationService:
+        def __init__(self):
+            self._stages: dict[str, str] = {}
+            self._phone_to_key: dict[str, str] = {}
+
+        def get_stage(self, phone: str) -> str | None:
+            return self._stages.get(phone)
+
+        def set_stage(self, phone: str, stage: str) -> None:
+            self._stages[phone] = stage
+
+        def set_user_key(self, phone: str, key: str) -> None:
+            self._phone_to_key[phone] = key
+
+        def get_user_key(self, phone: str) -> str | None:
+            return self._phone_to_key.get(phone)
+
+        def has_history(self, key: str) -> bool:
+
 
     
     # -----------------------------
