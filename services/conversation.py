@@ -79,6 +79,7 @@ class ConversationService:
             return self._phone_to_key.get(phone)
 
         def has_history(self, key: str) -> bool:
+            return key in self._histories and len(self._histories[key]) > 0
 
 
     
