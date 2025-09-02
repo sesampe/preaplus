@@ -99,45 +99,43 @@ class WhatsAppRouter:
     #    return ""
 
 
-
     async def heyoo_webhook(self, request: Request) -> Tuple[Dict[str, str], int]:
         """Handle incoming webhook from WhatsApp."""
-        # Verify signature (se fija si la firma de quien manda la solicitud es la permitida -Meta-)
         header_signature = request.headers.get("X-Hub-Signature-256") or request.headers.get("X-Hub-Signature")
         body = await request.body()
 
         # if not verify_webhook_signature(body, header_signature):
-        #    self.log.error("🚨 Webhook con firma inválida bloqueado")
-        #    raise HTTPException(status_code=403, detail="Invalid signature")
+        #     self.log.error("🚨 Webhook con firma inválida bloqueado")
+        #     raise HTTPException(status_code=403, detail="Invalid signature")
 
         try:
             data = await request.json()
             value = data["entry"][0]["changes"][0]["value"]
 
-            # Handle status messages (SE FIJA SI ES UN ESTADO DE UN MENSAJE, O UN MENSAJE.)
+            # 1) Status
             if "statuses" in value:
                 return await self._handle_status_message(value)
 
-            # Validate message exists
+            # 2) Debe haber messages
             if "messages" not in value:
                 self.log.warning("⚠️ Webhook sin 'messages' ni 'statuses'. Ignorando.")
                 return {"status": "ignored"}, 200
 
-            # Process message (EXTRAE DATOS DEL MENSAJE: NUMERO Y MENSAJE --> PARA HACER FUTURAS VALIDACIONES)
+            # 3) Extraer info básica
             message_entry = value["messages"][0]
             sender_phone = message_entry["from"]
 
-            # Validate phone
+            sender_phone = "542616463629"
+
+            # 4) Validaciones
             validation_country = validate_phone_country(sender_phone, self.wa_client)
             if not validation_country["valid"]:
                 return {"status": validation_country["status"]}, 200
 
-            # Process message content (DECIDE QUE HACER SEGN TIPO DE MENSAJE QUE ARROJO _PROCESS_MESSAGE)
             user_message = await self._process_message(message_entry, sender_phone)
             if user_message in ["reaction", "unsupported"]:
                 return {"status": f"{user_message}_received"}, 200
 
-            # Check for prompt injection
             if detect_prompt_injection(user_message):
                 self.log.warning(f"🚨 Intento de Prompt Injection detectado de {sender_phone}")
                 self.wa_client.send_message(
@@ -146,17 +144,14 @@ class WhatsAppRouter:
                 )
                 return {"status": "prompt_injection_blocked"}, 200
 
-            # Validate message content 
             validation_content = validate_message_content(user_message, sender_phone, self.wa_client)
             if not validation_content["valid"]:
                 return {"status": validation_content["status"]}, 200
 
-            # Get user profile and handle new user (MIRA DATOS A VER SI SE PUEDE SACAR UN NOMBRE)
             profile_info = value.get("contacts", [{}])[0].get("profile", {})
             user_name = profile_info.get("name")
-            
-            sender_phone = "542616463629"
-            # 1) Si es conversación nueva para este número, inicializá el estado y pedí DNI una sola vez
+
+            # 5) Onboarding por estado
             stage = conversation_service.get_stage(sender_phone)
             if stage is None:
                 conversation_service.set_stage(sender_phone, "awaiting_dni")
@@ -167,41 +162,31 @@ class WhatsAppRouter:
                 self.wa_client.send_message("Para iniciar, por favor ingresá tu DNI:", sender_phone)
                 return {"status": "greeted_and_requested_dni"}, 200
 
-            # 2) Manejo por estado
             if stage == "awaiting_dni":
                 dni = await self.is_valid_dni(user_message)
                 if not dni:
                     self.wa_client.send_message("Por favor, ingresá un DNI válido (solo números, sin puntos).", sender_phone)
                     return {"status": "dni_reprompted"}, 200
 
-                # Mapear este teléfono a la key = DNI, renombrar archivo, mover historial si hace falta
                 conversation_service.rename_conversation_file(sender_phone, dni)
                 conversation_service.set_user_key(sender_phone, dni)
                 conversation_service.set_stage(sender_phone, "triage")
 
                 self.log.debug(f"Conversación asociada a DNI {dni}")
                 self.wa_client.send_message(f"¡Gracias! Registré tu DNI: {dni}.", sender_phone)
-                # Podés seguir con tu primer pregunta clínica aquí y cortar SIN LLM:
                 self.wa_client.send_message("¿Tenés alguna alergia a medicamentos o alimentos?", sender_phone)
                 return {"status": "dni_registered"}, 200
 
-            # 3) A partir de acá, ya tenemos DNI → usar esa key SIEMPRE
-            key = conversation_service.get_user_key(sender_phone) or sender_phone  # fallback defensivo
+            # 6) Ya en triage: usar la key de usuario
+            key = conversation_service.get_user_key(sender_phone) or sender_phone
             if conversation_service.get_stage(sender_phone) != "triage":
-                # Si por alguna razón el estado no es triage, forzalo
                 conversation_service.set_stage(sender_phone, "triage")
 
             # >>> SOLO aquí hablamos con el LLM <<<
-            # Estado actual (si no tenés persistencia propia):
             current_state = FORM_STATE.get(key, {})
-
-            # 1) Extraer con structured output + merge/normalización
             updated_state = llm_update_state(user_message, current_state)
-
-            # 2) Guardar el nuevo estado (cambiá esto por conversation_service.set_form_state(key, updated_state) si lo tenés)
             FORM_STATE[key] = updated_state
 
-            # 3) Armar confirmación humana breve
             confirms = []
             ant = updated_state.get("antropometria", {})
             prev_ant = (current_state.get("antropometria") or {}) if current_state else {}
@@ -231,6 +216,9 @@ class WhatsAppRouter:
             self.wa_client.send_message(msg, sender_phone)
             return {"status": "responded"}, 200
 
+        except Exception as e:
+            self.log.exception(f"🚨 Error procesando webhook: {e}")
+            return {"status": "error_processing_webhook"}, 500
 
     async def send_manual_message(self, request: MessageRequest) -> Dict[str, Any]: #ESTE ES UN def POR SI QUEREMOS MANDAR UN MENSAJE MANUALMENTE DESDE LA API
         """Send a manual message to a WhatsApp user."""
