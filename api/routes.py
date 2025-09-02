@@ -43,44 +43,68 @@ def save_state(state: ConversationState):
 # ====== Core TRIAGE ======
 def _triage_block(state: ConversationState, text: str) -> Tuple[str, ConversationState]:
     module_idx = state.module_idx
+
+    # 1) Patch local
     patch_local = fill_from_text_modular(state, module_idx, text or "")
     if patch_local:
         state = merge_state(state, {"ficha": patch_local.get("ficha", patch_local)})
 
-    needs_llm = MODULES[module_idx]["use_llm"]
-    if needs_llm:
-        patch_llm = llm_parse_modular(text or "", module_idx)
+    # 2) Patch LLM (si el módulo lo usa)
+    patch_llm = {}
+    if MODULES[module_idx]["use_llm"]:
+        patch_llm = llm_parse_modular(text or "", module_idx) or {}
         if patch_llm:
             state = merge_state(state, {"ficha": patch_llm.get("ficha", patch_llm)})
 
-    confirm = summarize_patch_for_confirmation(
-        {"ficha": patch_local.get("ficha", {})} if patch_local else {"ficha": {}}, 
-        module_idx
+    # 3) Confirmación usando el patch combinado
+    combined = {"ficha": {}}
+    if patch_local and patch_local.get("ficha"):
+        combined["ficha"].update(patch_local["ficha"])
+    if patch_llm and patch_llm.get("ficha"):
+        combined["ficha"].update(patch_llm["ficha"])
+
+    had_any = bool(combined.get("ficha"))
+    confirm = (
+        summarize_patch_for_confirmation(combined, module_idx)
+        if had_any
+        else "No pude extraer datos de este bloque."
     )
 
-    state.module_idx = min(state.module_idx + 1, len(MODULES) - 1)
+    # 4) Avance: solo si hubo algo que anotar
+    if had_any:
+        state.module_idx = min(state.module_idx + 1, len(MODULES) - 1)
+
     next_idx, next_prompt = advance_module(state)
     if next_idx is None:
-        reply = f"{confirm}. ¡Listo! Completamos todos los bloques."
+        reply = f"{confirm} ¡Listo! Completamos todos los bloques."
     else:
         state.module_idx = next_idx
-        reply = f"{confirm}. ¿Falta algo de este bloque? Si no, sigamos. {next_prompt}"
+        reply = f"{confirm} {next_prompt}"
     return reply, state
 
 # ====== HTTP ======
 @router.post("/webhook")
 async def webhook(req: Request):
     payload = await req.json()
+
     # Intentá extraer texto desde distintos formatos
     text = (
-        payload.get("text") 
-        or payload.get("message") 
+        payload.get("text")
+        or payload.get("message")
         or payload.get("body")
     )
     if not text and "messages" in payload:
         msgs = payload["messages"]
         if isinstance(msgs, list) and msgs and "text" in msgs[0]:
             text = msgs[0]["text"].get("body")
+    # Formato oficial de Meta (WhatsApp Cloud)
+    if not text:
+        try:
+            msg = payload["entry"][0]["changes"][0]["value"]["messages"][0]
+            if msg.get("type") == "text":
+                text = msg["text"]["body"]
+        except Exception:
+            text = ""
 
     # Siempre usar el hardcode
     user_id = HARDCODED_USER_ID
@@ -93,7 +117,7 @@ async def webhook(req: Request):
     try:
         wa_client.send_message(message=reply, recipient_id=user_id)
         sent = True
-    except Exception as e:
+    except Exception:
         sent = False
 
     return JSONResponse({

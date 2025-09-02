@@ -2,6 +2,7 @@
 from typing import Dict, Any, List, Tuple, Optional
 from datetime import date
 import json
+import re  # <- agregado
 
 from models.schemas import ConversationState, FichaPreanestesia, AlergiaMedicacion, Alergias, AlergiaItem, MedicacionItem, Antecedentes, Cardio, Respiratorio, Endocrino, Renal, Neuro, Complementarios, Labs, ImagenItem
 from services.validators import (
@@ -71,19 +72,28 @@ def fill_from_text_modular(state: ConversationState, module_idx: int, text: str)
             _set(patch, "ficha.dni", dni)
 
     elif name == "DATOS":
-        # nombre heurístico: primeras 3 palabras con mayúscula inicial
+        t = (text or "").strip()
+
+        # nombre: acepta "me llamo/soy ..." o mayúsculas iniciales
         nombre = None
-        tokens = [t for t in (text or "").strip().split() if t.istitle()]
-        if len(tokens) >= 2:
-            nombre = " ".join(tokens[:3])[:80]
-        fnac = parse_fecha(text)
+        m = re.search(r"(?:me llamo|soy)\s+([a-záéíóúñ]+(?:\s+[a-záéíóúñ]+){1,2})", t, re.I)
+        if m:
+            nombre = " ".join(w.capitalize() for w in m.group(1).split())[:80]
+        else:
+            tokens = [tok for tok in t.split() if tok[:1].isalpha() and tok.istitle()]
+            if len(tokens) >= 2:
+                nombre = " ".join(tokens[:3])[:80]
+
+        fnac = parse_fecha(t)
         edad = edad_from_fecha_nacimiento(fnac) if fnac else None
+
         if nombre:
             _set(patch, "ficha.datos.nombre_completo", nombre)
         if fnac:
             _set(patch, "ficha.datos.fecha_nacimiento", fnac.isoformat())
         if edad is not None:
             _set(patch, "ficha.datos.edad", edad)
+        # siempre registramos fecha de evaluación
         _set(patch, "ficha.datos.fecha_evaluacion", _now_date().isoformat())
 
     elif name == "ANTROPOMETRIA":
@@ -255,19 +265,35 @@ def prompt_for_module(module_idx: int) -> str:
     return prompts.get(name, "Contame lo que corresponda para este bloque.")
 
 def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> str:
+    def val(x, placeholder="—"):
+        return placeholder if x in (None, "", [], {}) else x
+
     name = MODULES[module_idx]["name"]
     try:
         if name == "DNI":
-            return f"Anoté DNI: {patch['ficha']['dni']}"
+            d = patch.get("ficha", {}).get("dni")
+            return f"Anoté DNI: {val(d)}"
         if name == "DATOS":
-            d = patch["ficha"]["datos"]
-            return f"Anoté: {d.get('nombre_completo')}, nac. {d.get('fecha_nacimiento')}, edad {d.get('edad')}"
+            d = patch.get("ficha", {}).get("datos", {})
+            return (
+                f"Anoté: {val(d.get('nombre_completo'))}, "
+                f"nac. {val(d.get('fecha_nacimiento'))}, "
+                f"edad {val(d.get('edad'))}"
+            )
         if name == "ANTROPOMETRIA":
-            a = patch["ficha"]["antropometria"]
-            return f"Anoté: peso {a.get('peso_kg')} kg, talla {a.get('talla_cm')} cm, IMC {a.get('imc')}"
+            a = patch.get("ficha", {}).get("antropometria", {})
+            return (
+                f"Anoté: peso {val(a.get('peso_kg'))} kg, "
+                f"talla {val(a.get('talla_cm'))} cm, "
+                f"IMC {val(a.get('imc'))}"
+            )
         if name == "COBERTURA":
-            c = patch["ficha"]["cobertura"]
-            return f"Anoté: OS {c.get('obra_social')}, afiliado {c.get('afiliado')}, motivo {c.get('motivo_cirugia')}"
+            c = patch.get("ficha", {}).get("cobertura", {})
+            return (
+                f"Anoté: OS {val(c.get('obra_social'))}, "
+                f"afiliado {val(c.get('afiliado'))}, "
+                f"motivo {val(c.get('motivo_cirugia'))}"
+            )
         if name == "ALERGIA_MEDICACION":
             return "Anoté alergias y medicación habitual."
         if name == "ANTECEDENTES":
