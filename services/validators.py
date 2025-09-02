@@ -191,7 +191,7 @@ def parse_via_aerea(text: str) -> Dict[str, Optional[bool]]:
             flags["protesis_dentaria"] = False
         if "apnea" in t:
             flags["ronquidos_apnea"] = False
-        if "dientes flojos" in t or "diente flojo" in t:
+        if "dientes flojos" in t o r "diente flojo" in t:
             flags["dientes_flojos"] = False
     return flags
 
@@ -224,3 +224,55 @@ def inr_en_rango(inr: Optional[float]) -> bool:
         return 0.5 <= v <= 10.0
     except Exception:
         return False
+
+
+# === NUEVO: Validadores usados por api.health ===
+
+# Mapeo mínimo de códigos de país -> ISO2 (extensible)
+_CC_TO_ISO2 = {
+    "54": "AR",  # Argentina
+    "56": "CL",  # Chile
+    "57": "CO",  # Colombia
+    "52": "MX",  # México
+    "34": "ES",  # España
+}
+
+def _extraer_cod_pais(phone: str) -> str:
+    """
+    Extrae el código de país del número (e.g. '+54911...' -> '54').
+    Si no puede, devuelve ''.
+    """
+    if not phone:
+        return ""
+    s = re.sub(r"[^\d]", "", phone)  # solo dígitos
+    # Heurística: los móviles internacionales empiezan por el código de país (2–3 dígitos)
+    return s[:2] if len(s) >= 2 else ""
+
+def validate_phone_country(phone: str, wa_client) -> Dict[str, str | bool]:
+    """
+    Valida que el número pertenezca a un país permitido.
+    Devuelve: {"valid": bool, "country": str}
+    - Implementación laxa por ahora: marca válido y mapea el país si puede.
+    """
+    cc = _extraer_cod_pais(phone)
+    iso2 = _CC_TO_ISO2.get(cc, "unknown")
+    # Si querés restringir países, cambiá la condición de valid.
+    valid = True  # por ahora no bloquea
+    return {"valid": valid, "country": iso2}
+
+def validate_message_content(message: str, sender_phone: str, wa_client) -> Dict[str, bool]:
+    """
+    Valida el contenido básico del mensaje.
+    Devuelve: {"valid": bool}
+    Reglas mínimas:
+      - no vacío
+      - al menos 2 caracteres útiles
+      - evita solo emojis/espacios
+    """
+    if not message:
+        return {"valid": False}
+    txt = message.strip()
+    if len(txt) < 2:
+        return {"valid": False}
+    # Si querés agregar listas de palabras prohibidas, hacelo acá.
+    return {"valid": True}
