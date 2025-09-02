@@ -87,8 +87,8 @@ class WhatsAppRouter:
         )
 
         if 6 <= len(dni) <= 12:   # rango flexible para DNI o pasaporte
-            return dni
-        return None
+            return True
+        return False
     
     #async def _handle_new_user(self, sender_phone: str, user_name: str) -> str: #analiza si es nuevo paciente o no, para ver como lo saluda.
     #    """Handle new user interaction and return appropriate greeting."""
@@ -168,10 +168,10 @@ class WhatsAppRouter:
 
             # Cambia nombre del json por el DNI del paciente.
             dni_valido = await self.is_valid_dni(user_message)
-            if dni_valido:
+            if dni_valido == True:
                 conversation_service.rename_conversation_file(sender_phone, user_message)
                 self.log.debug(f"JSON cambiado de nombre a: {user_message}")
-                if not:
+                if dni_valido == False:
                     self.wa_client.send_message('POR FAVOR, INGRESE DNI VALIDO:', sender_phone)
             
 
