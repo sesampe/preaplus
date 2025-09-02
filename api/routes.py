@@ -93,8 +93,8 @@ async def webhook(req: Request):
     payload = await req.json()
     text = payload.get("text") or payload.get("message") or ""
 
-    user_id = "542616463629"
-    # user_id = _infer_user_id(payload)
+    #user_id = "542616463629"
+    user_id = _infer_user_id(payload)
 
     state = load_state(user_id)
     reply, state = _triage_block(state, text)
