@@ -1,8 +1,8 @@
 from fastapi import FastAPI
 
 # --- Logging primero ---
-from core.logger import setup_logging
-log = setup_logging()
+from core.logger import LoggerManager
+log = LoggerManager(name="main", level="INFO", log_to_file=False).get_logger()
 log.info("Aplicación iniciada")
 
 # --- FastAPI app ---
