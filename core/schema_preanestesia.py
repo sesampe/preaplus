@@ -1,5 +1,6 @@
 # core/schema_preanestesia.py
-## ESTO LO QUE HACE ES QUE LOS DATOS TENGAN UN BUEN FORMATO = PYDANTIC
+
+## ESTO LO QUE HACE ES QUE LOS DATOS TENGAN FORMATO CORRECTO (lo hace con PYDANTIC)
 
 from typing import Optional, List
 from pydantic import BaseModel, Field

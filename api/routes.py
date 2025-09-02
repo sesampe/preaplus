@@ -75,7 +75,7 @@ class WhatsAppRouter:
                     "No puedo procesar este tipo de mensaje. ¿Podrías enviarme un mensaje de texto?",
                     sender_phone
                 )
-                return "unsupported"
+            return "unsupported"
         return message_entry["text"]["body"]
     
     async def is_valid_dni(self, message: str) -> str | None:
