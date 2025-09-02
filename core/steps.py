@@ -13,6 +13,35 @@ from services.validators import (
 )
 from services.llm_client import llm_client
 
+# ===== Config antibucle =====
+MAX_RETRIES = 3  # intentos por módulo antes de dar fallback
+
+def _module_key(idx: int) -> str:
+    return MODULES[idx]["name"]
+
+def _ensure_retry_bucket(state: ConversationState):
+    # ⛳️ Si tu ConversationState no tiene retry_counts, agregalo al modelo.
+    if not hasattr(state, "retry_counts") or state.retry_counts is None:
+        # @@@ si preferís otro bucket (p.ej. state.meta), cambiá esta línea:
+        state.retry_counts = {}  # type: ignore[attr-defined]
+
+def _inc_retry(state: ConversationState, module_idx: int) -> int:
+    _ensure_retry_bucket(state)
+    k = _module_key(module_idx)
+    cur = state.retry_counts.get(k, 0)  # type: ignore[index]
+    state.retry_counts[k] = cur + 1     # type: ignore[index]
+    return state.retry_counts[k]        # type: ignore[index]
+
+def _reset_retry(state: ConversationState, module_idx: int):
+    _ensure_retry_bucket(state)
+    k = _module_key(module_idx)
+    if k in state.retry_counts:          # type: ignore[operator]
+        state.retry_counts[k] = 0        # type: ignore[index]
+
+def _retries(state: ConversationState, module_idx: int) -> int:
+    _ensure_retry_bucket(state)
+    return int(state.retry_counts.get(_module_key(module_idx), 0))  # type: ignore[index]
+
 # ===== Definición de módulos =====
 
 MODULES: List[Dict[str, Any]] = [
@@ -62,7 +91,8 @@ def _now_date() -> date:
 # ===== Parsers locales por módulo =====
 
 def fill_from_text_modular(state: ConversationState, module_idx: int, text: str) -> Dict[str, Any]:
-    """Devuelve un patch dict (serializable) con lo que pudo extraer localmente."""
+    """Devuelve un patch dict (serializable) con lo que pudo extraer localmente.
+       Antibucle: si no se extrae nada, incrementa contador; si se extrae, resetea."""
     patch: Dict[str, Any] = {}
     name = MODULES[module_idx]["name"]
 
@@ -113,11 +143,13 @@ def fill_from_text_modular(state: ConversationState, module_idx: int, text: str)
         afiliado = parse_afiliado(text)
         if afiliado:
             _set(patch, "ficha.cobertura.afiliado", afiliado)
-        # heurística para OS: toma todo el texto si no hay nada cargado aún
-        if text and len(text.strip()) >= 3 and not state.ficha.cobertura.obra_social:
-            _set(patch, "ficha.cobertura.obra_social", text.strip()[:80])
-        if text and len(text.strip()) >= 3 and not state.ficha.cobertura.motivo_cirugia:
-            _set(patch, "ficha.cobertura.motivo_cirugia", text.strip()[:160])
+        # heurística para OS y motivo
+        t = (text or "").strip()
+        if t and len(t) >= 3:
+            if not state.ficha.cobertura.obra_social:
+                _set(patch, "ficha.cobertura.obra_social", t[:80])
+            if not state.ficha.cobertura.motivo_cirugia:
+                _set(patch, "ficha.cobertura.motivo_cirugia", t[:160])
 
     elif name == "SUSTANCIAS":
         fuma, packs, ap = parse_tabaco(text)
@@ -138,6 +170,12 @@ def fill_from_text_modular(state: ConversationState, module_idx: int, text: str)
         for k, v in flags.items():
             if v is not None:
                 _set(patch, f"ficha.via_aerea.{k}", v)
+
+    # —— antibucle: actualizar contador acá
+    if patch:
+        _reset_retry(state, module_idx)
+    else:
+        _inc_retry(state, module_idx)
 
     return patch
 
@@ -234,15 +272,35 @@ def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
         }
         _set(patch, "ficha.complementarios", comp)
 
+    # —— antibucle para módulos con LLM también:
+    if patch:
+        _reset_retry(state, module_idx)
+    else:
+        _inc_retry(state, module_idx)
+
     return patch
 
 # ===== Avance y mensajes =====
 
 def advance_module(state: ConversationState) -> Tuple[Optional[int], Optional[str]]:
-    """Devuelve (next_idx, next_prompt) o (None, None) si terminó."""
+    """Devuelve (next_idx, next_prompt) o (None, None) si terminó.
+       Antibucle: si supera MAX_RETRIES en un módulo obligatorio, da fallback explícito."""
     for i in range(state.module_idx, len(MODULES)):
         missing = _missing_required(state, i)
         if missing:
+            # si está trabado en este módulo
+            retries = _retries(state, i)
+            if retries >= MAX_RETRIES:
+                name = MODULES[i]["name"]
+                # Mensaje de salida/fallback por módulo
+                if name == "DNI":
+                    return i, ("No logré entender tu DNI tras varios intentos. "
+                               "Escribilo SOLO con números, sin puntos ni espacios. Ejemplo: 12345678. "
+                               "Si preferís, podés escribir 'cancelar' y retomamos más tarde.")
+                else:
+                    return i, ("No pude extraer datos válidos para este bloque. "
+                               "Probá con un formato más simple o decí 'saltar' para pasar al siguiente.")
+            # caso normal: pedir prompt del módulo
             return i, prompt_for_module(i)
         # incluso si no hay missing, igual pedimos input del módulo para confirmación breve
         if i == state.module_idx:
@@ -252,7 +310,7 @@ def advance_module(state: ConversationState) -> Tuple[Optional[int], Optional[st
 def prompt_for_module(module_idx: int) -> str:
     name = MODULES[module_idx]["name"]
     prompts = {
-        "DNI": "Decime tu DNI (solo números).",
+        "DNI": "Decime tu DNI (solo números, sin puntos ni espacios). Ej: 12345678",
         "DATOS": "Nombre y apellido, y tu fecha de nacimiento (dd/mm/aaaa).",
         "ANTROPOMETRIA": "Decime peso (kg) y talla (cm o en metros).",
         "COBERTURA": "¿Cuál es tu obra social y n.º de afiliado? ¿Motivo de la cirugía?",
@@ -272,6 +330,9 @@ def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> 
     try:
         if name == "DNI":
             d = patch.get("ficha", {}).get("dni")
+            if not d:
+                # Mensaje claro cuando no se pudo extraer
+                return "No pude extraer un DNI. Escribilo SOLO con números, sin puntos ni espacios. Ej: 12345678"
             return f"Anoté DNI: {val(d)}"
         if name == "DATOS":
             d = patch.get("ficha", {}).get("datos", {})
