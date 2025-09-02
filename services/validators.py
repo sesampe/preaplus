@@ -7,7 +7,8 @@ from typing import Optional
 from heyoo import WhatsApp
 
 from core.logger import LoggerManager
-from core.settings import OPENAI_API_KEY, OPENAI_MODEL
+from core.settings import settings
+
 
 log = LoggerManager(name="validators", level="INFO", log_to_file=False).get_logger()
 
