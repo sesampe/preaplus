@@ -34,15 +34,24 @@ class _Settings:
     DATA_DIR: Path = DATA_DIR
     CONVERSATION_HISTORY_DIR: Path = CONVERSATION_HISTORY_DIR
     TAKEOVER_FILE: Path = TAKEOVER_FILE
+
     # Otros
     OPENAI_API_KEY: str | None = OPENAI_API_KEY
     HEYOO_TOKEN: str = HEYOO_TOKEN
     ENV: str = ENV
+
     # Drive/Productos
     SERVICE_ACCOUNT_FILE: str = SERVICE_ACCOUNT_FILE
     PRODUCT_LIST_FILE_ID: str = PRODUCT_LIST_FILE_ID
     CATALOG_PDF_LINK: str = CATALOG_PDF_LINK
     PRODUCTS_CACHE_FILE: str = PRODUCTS_CACHE_FILE
+
+    # LLM
+    LLM_API_BASE: str = os.getenv("LLM_API_BASE", "https://api.openai.com/v1")
+    LLM_HTTP_TIMEOUT: int = int(os.getenv("LLM_HTTP_TIMEOUT", "10"))
+    LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "2"))
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-3.5-turbo")
+    LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0"))
 
 settings = _Settings()
 
@@ -52,11 +61,16 @@ __all__ = [
     "CONVERSATION_HISTORY_DIR",
     "TAKEOVER_FILE",
     "OPENAI_API_KEY",
-    "HEYOO_TOKEN",          # 👈 agregado
+    "HEYOO_TOKEN",
     "ENV",
     "settings",
     "SERVICE_ACCOUNT_FILE",
     "PRODUCT_LIST_FILE_ID",
     "CATALOG_PDF_LINK",
     "PRODUCTS_CACHE_FILE",
+    "LLM_API_BASE",
+    "LLM_HTTP_TIMEOUT",
+    "LLM_MAX_RETRIES",
+    "LLM_MODEL",
+    "LLM_TEMPERATURE",
 ]
