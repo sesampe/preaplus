@@ -20,6 +20,19 @@ from core.settings import (
 )
 from core.logger import LoggerManager
 
+def _sanitize_history(history):
+    """
+    Deja solo roles 'user' y 'assistant', evita contaminar con 'system'
+    y fuerza a que siempre exista 'content' (string).
+    """
+    out = []
+    for m in history or []:
+        role = m.get("role")
+        if role in ("user", "assistant"):
+            out.append({"role": role, "content": m.get("content", "")})
+    return out
+
+
 class LLMClient:
     """Cliente para interactuar con APIs de modelos de lenguaje (OpenAI GPT y Anthropic Claude)."""
 
@@ -57,7 +70,9 @@ class LLMClient:
     # -------------------------
     async def ask_claude(self, user_message: str, conversation_history: List[Dict[str, Any]]) -> str:
         """Envía la conversación a Claude y devuelve el texto de respuesta."""
-        messages = [{"role": msg["role"], "content": msg["content"]} for msg in conversation_history]
+        # Sanear historial: solo user/assistant
+        messages = _sanitize_history(conversation_history)
+        # Agregar último user
         messages.append({"role": "user", "content": user_message})
 
         try:
@@ -72,7 +87,8 @@ class LLMClient:
                 json_data={
                     "model": CLAUDE_MODEL,
                     "max_tokens": 500,
-                    "system": SYSTEM_PROMPT,  # ← solo prompt clínico
+                    # Mantener system separado en Claude
+                    "system": SYSTEM_PROMPT,
                     "messages": messages
                 }
             )
@@ -82,22 +98,27 @@ class LLMClient:
             self.log.error(f"❌ Error llamando a Claude API: {e}")
             return "No puedo responder en este momento. ¿Querés que te conecte con una persona?"
 
+
     # -------------------------
     # Llamadas al modelo (OpenAI)
     # -------------------------
     async def ask_gpt(self, user_message: str, conversation_history: List[Dict[str, Any]]) -> str:
         """Envía la conversación a GPT con reintentos básicos y devuelve el texto de respuesta."""
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT}  # ← solo prompt clínico
-        ]
-        messages.extend([{"role": msg["role"], "content": msg["content"]} for msg in conversation_history])
+        # Siempre inyectar system UNA vez
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        # Historial saneado (sin 'system' internos)
+        messages.extend(_sanitize_history(conversation_history))
+        # Último user
         messages.append({"role": "user", "content": user_message})
 
         for attempt in range(self.max_retries):
             try:
                 response = await self._make_http_request(
                     "https://api.openai.com/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                    headers={
+                        "Authorization": f"Bearer {OPENAI_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
                     json_data={
                         "model": OPENAI_MODEL,
                         "messages": messages,
@@ -127,6 +148,7 @@ class LLMClient:
         except Exception as e:
             self.log.error(f"❌ Error también consultando Claude: {e}")
             return "Actualmente estamos experimentando dificultades. ¿Querés que te conecte con una persona?"
+
 
     # -------------------------
     # Utilidades simples (resúmenes)

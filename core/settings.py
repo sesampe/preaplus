@@ -1,40 +1,60 @@
 import os
-from dotenv import load_dotenv
 from pathlib import Path
+from dotenv import load_dotenv
 
-SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "")
-SYSTEM_PROMPT_FILE = os.getenv("SYSTEM_PROMPT_FILE")
-
-# Carga las variables desde el archivo .env
+# 1) Cargar .env ANTES de leer variables
 load_dotenv()
 
-# Configuración del proveedor de IA
+# === Constantes de proveedor/modelos ===
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
 
-# Configuración LLM
-CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY","")
+CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-7-sonnet-20250219")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY","")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "")
 
-# Google Drive
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+
+# === System Prompt ===
+SYSTEM_PROMPT_FILE = os.getenv("SYSTEM_PROMPT_FILE", "").strip() or None
+SYSTEM_PROMPT_ENV = os.getenv("SYSTEM_PROMPT", "")
+
+def _load_system_prompt():
+    """
+    Prioridad:
+    1) Archivo especificado por SYSTEM_PROMPT_FILE
+    2) Variable de entorno SYSTEM_PROMPT
+    Retorna string (sin BOM/espacios) o "" si no hay nada.
+    """
+    # A) desde archivo si existe
+    if SYSTEM_PROMPT_FILE:
+        p = Path(SYSTEM_PROMPT_FILE)
+        if p.is_file():
+            try:
+                return p.read_text(encoding="utf-8").strip()
+            except Exception:
+                # fallback al env si falla la lectura
+                pass
+
+    # B) desde env como fallback
+    return (SYSTEM_PROMPT_ENV or "").strip()
+
+SYSTEM_PROMPT = _load_system_prompt()
+
+# === Resto de configuración de tu app ===
 PRODUCT_LIST_FILE_ID = os.getenv("PRODUCT_LIST_FILE_ID")
 CATALOG_PDF_FILE_ID = os.getenv("CATALOG_PDF_FILE_ID")
 CATALOG_PDF_LINK = f"https://drive.google.com/file/d/{CATALOG_PDF_FILE_ID}/view?usp=sharing"
 SERVICE_ACCOUNT_FILE = "service-account-key.json"
 PRODUCTS_CACHE_FILE = "data/products_cache.json"
 
-# WhatsApp via Heyoo
 HEYOO_TOKEN = os.getenv("HEYOO_TOKEN")
 HEYOO_PHONE_ID = os.getenv("HEYOO_PHONE_ID")
 OWNER_PHONE_NUMBER = os.getenv("OWNER_PHONE_NUMBER")
 
-# Conversaciones
 CONVERSATION_HISTORY_DIR = "data/conversation_histories"
 TAKEOVER_FILE = "data/takeover_status.json"
 
-APP_SECRET = os.getenv("APP_SECRET")  # Cambia esto por tu secreto real
+APP_SECRET = os.getenv("APP_SECRET")
 
 
 # === Molde de salida para evaluación preanestésica (JSON) ===

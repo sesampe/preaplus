@@ -1,5 +1,11 @@
 from fastapi import FastAPI
 
+# --- Logging primero ---
+from core.logger import setup_logging
+log = setup_logging()
+log.info("Aplicación iniciada")
+
+# --- FastAPI app ---
 from api.routes import router as api_router
 from api.health import router as health_router
 from middlewares.payload_limiters import limit_payload_size
@@ -7,17 +13,13 @@ from middlewares.rate_limiter import limit_rate_per_phone
 
 app = FastAPI(title="Asistente virtual de Delirio Picante")
 
-
-# Primero limitador de tamaño
+# Middlewares
 app.middleware("http")(limit_payload_size)
-
-# Luego limitador de frecuencia por número
 app.middleware("http")(limit_rate_per_phone)
 
-# Registramos primero Health para que sea liviano
+# Routers
 app.include_router(health_router, prefix="/api")
 app.include_router(api_router)
-
 
 if __name__ == "__main__":
     import uvicorn

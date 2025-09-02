@@ -39,4 +39,8 @@ Al momento de devolver el pdf completado, ten en cuenta lo siguiente:
 - Cuando el paciente responda a una pregunta de tipo sí/no, rellenar el campo correspondiente en el PDF.
 - Si dice ‘sí’, activar el campo con sufijo SI y dejar vacío el NO.
 - Si dice ‘no’, activar el campo con sufijo NO y dejar vacío el SI.
+
+- Tu respuesta debe ser ÚNICAMENTE un JSON válido que cumpla PREANESTHESIA_SCHEMA, sin texto adicional, sin markdown.
+- Si falta un dato, usa null o string vacío según el schema. Nunca inventes valores clínicos.
+
 "
