@@ -18,6 +18,7 @@ TAKEOVER_FILE = Path(os.getenv("TAKEOVER_FILE", DATA_DIR / "takeover.flag"))
 
 # ---------- otros opcionales ----------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # si lo usas
+HEYOO_TOKEN = os.getenv("HEYOO_TOKEN", "")    # 👈 agregado para audio_processing
 ENV = os.getenv("ENV", "production")
 
 # ---------- Google Drive / Productos ----------
@@ -35,6 +36,7 @@ class _Settings:
     TAKEOVER_FILE: Path = TAKEOVER_FILE
     # Otros
     OPENAI_API_KEY: str | None = OPENAI_API_KEY
+    HEYOO_TOKEN: str = HEYOO_TOKEN
     ENV: str = ENV
     # Drive/Productos
     SERVICE_ACCOUNT_FILE: str = SERVICE_ACCOUNT_FILE
@@ -50,6 +52,7 @@ __all__ = [
     "CONVERSATION_HISTORY_DIR",
     "TAKEOVER_FILE",
     "OPENAI_API_KEY",
+    "HEYOO_TOKEN",          # 👈 agregado
     "ENV",
     "settings",
     "SERVICE_ACCOUNT_FILE",
