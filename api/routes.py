@@ -20,33 +20,31 @@ from services.validators import (
 from services.user_profiles import extract_name_with_llm
 from services.audio_processing import audio_processor
 
+# <<< NUEVO: flujo de pasos >>>
+from core.steps import init_state_for_dni, compute_reply, QUESTION_TEXT
+
 FORM_STATE: Dict[str, Any] = {}
 
 class WhatsAppRouter:
     def __init__(self):
-        """Initialize the WhatsApp router with all required services.""" # DEFINE RUTAS
+        """Initialize the WhatsApp router with all required services."""
         self.router = APIRouter()
         self.wa_client = WhatsApp(token=HEYOO_TOKEN, phone_number_id=HEYOO_PHONE_ID)
         self.log = LoggerManager(name="routes", level="INFO", log_to_file=False).get_logger()
-        
-        # Register routes
         self._register_routes()
         
-    def _register_routes(self): #define endpoints que te manda whatsapp a la app
-        """Register all routes with the router."""
+    def _register_routes(self):
         self.router.get("/webhook")(self.verify_webhook)
         self.router.post("/webhook")(self.heyoo_webhook)
         self.router.post("/send")(self.send_manual_message)
         
-    async def verify_webhook(self, request: Request) -> Any: #verifica que webhook este OK
-        """Verify webhook endpoint for WhatsApp API setup."""
+    async def verify_webhook(self, request: Request) -> Any:
         params = request.query_params
         if params.get("hub.verify_token") == "HolaAI":
             return int(params.get("hub.challenge"))
         return "Token inválido", 403
     
-    async def _handle_status_message(self, value: Dict[str, Any]) -> Tuple[Dict[str, str], int]: #checkea que mensaje que envias llegue, si se lee,etc
-        """Handle status message from WhatsApp."""
+    async def _handle_status_message(self, value: Dict[str, Any]) -> Tuple[Dict[str, str], int]:
         status_entry = value["statuses"][0]
         status = status_entry.get("status")
         message_id = status_entry.get("id")
@@ -61,8 +59,7 @@ class WhatsAppRouter:
 
         return {"status": "status_logged"}, 200
     
-    async def _process_message(self, message_entry: Dict[str, Any], sender_phone: str) -> str: #ANALIZA QUE TIPO DE MENSAJE ES
-        """Process incoming message and return the message content."""
+    async def _process_message(self, message_entry: Dict[str, Any], sender_phone: str) -> str:
         if message_entry.get("type") != "text":
             if message_entry.get("type") == "audio":
                 media_id = message_entry["audio"]["id"]
@@ -85,22 +82,7 @@ class WhatsAppRouter:
         else:
             return None
 
-    
-    #async def _handle_new_user(self, sender_phone: str, user_name: str) -> str: #analiza si es nuevo paciente o no, para ver como lo saluda.
-    #    """Handle new user interaction and return appropriate greeting."""
-    #    sender_phone = "2616463629"
-    #    if not conversation_service.get_name_from_conversation(sender_phone):
-    #        if not conversation_service.get_conversation_history(sender_phone):
-    #            if user_name and es_nombre_valido(user_name):
-    #                if await is_real_name_with_gpt(user_name):
-    #                    conversation_service.set_customer_name(sender_phone, user_name)
-    #                    return f"¡Hola {user_name}! Soy tu medico anestesiologo y voy a realizarte algunas preguntas para completar tu ficha anestesiologica"
-    #            return "¡Hola! Soy tu medico anestesiologo y voy a realizarte algunas preguntas para completar tu ficha anestesiologica"
-    #    return ""
-
-
     async def heyoo_webhook(self, request: Request) -> Tuple[Dict[str, str], int]:
-        """Handle incoming webhook from WhatsApp."""
         header_signature = request.headers.get("X-Hub-Signature-256") or request.headers.get("X-Hub-Signature")
         body = await request.body()
 
@@ -121,10 +103,10 @@ class WhatsAppRouter:
                 self.log.warning("⚠️ Webhook sin 'messages' ni 'statuses'. Ignorando.")
                 return {"status": "ignored"}, 200
 
-            # 3) Extraer info básica
+            # 3) Info básica
             message_entry = value["messages"][0]
-            sender_phone = message_entry["from"]
-
+            sender_phone = message_entry["from"]  
+            
             sender_phone = "542616463629"
 
             # 4) Validaciones
@@ -172,56 +154,31 @@ class WhatsAppRouter:
                 conversation_service.set_user_key(sender_phone, dni)
                 conversation_service.set_stage(sender_phone, "triage")
 
+                FORM_STATE[dni] = init_state_for_dni()
                 self.log.debug(f"Conversación asociada a DNI {dni}")
                 self.wa_client.send_message(f"¡Gracias! Registré tu DNI: {dni}.", sender_phone)
-                self.wa_client.send_message("¿Tenés alguna alergia a medicamentos o alimentos?", sender_phone)
+                self.wa_client.send_message(QUESTION_TEXT["alergias"], sender_phone)
                 return {"status": "dni_registered"}, 200
 
-            # 6) Ya en triage: usar la key de usuario
+            # 6) TRIAGE
             key = conversation_service.get_user_key(sender_phone) or sender_phone
             if conversation_service.get_stage(sender_phone) != "triage":
                 conversation_service.set_stage(sender_phone, "triage")
 
-            # >>> SOLO aquí hablamos con el LLM <<<
             current_state = FORM_STATE.get(key, {})
             updated_state = llm_update_state(user_message, current_state)
-            FORM_STATE[key] = updated_state
+            FORM_STATE[key] = updated_state  # guardamos primero
 
-            confirms = []
-            ant = updated_state.get("antropometria", {})
-            prev_ant = (current_state.get("antropometria") or {}) if current_state else {}
-
-            if ant.get("talla_cm") and ant.get("talla_cm") != prev_ant.get("talla_cm"):
-                confirms.append(f"Estatura: {int(ant['talla_cm'])} cm")
-            if ant.get("peso_kg") and ant.get("peso_kg") != prev_ant.get("peso_kg"):
-                confirms.append(f"Peso: {ant['peso_kg']} kg")
-            if ant.get("imc") and ant.get("imc") != prev_ant.get("imc"):
-                confirms.append(f"IMC: {ant['imc']}")
-
-            alerg = updated_state.get("alergias", {})
-            prev_alerg = (current_state.get("alergias") or {}) if current_state else {}
-            if alerg.get("tiene_alergias") is True and alerg.get("tiene_alergias") != prev_alerg.get("tiene_alergias"):
-                confirms.append("Alergias: sí")
-            elif alerg.get("tiene_alergias") is False and alerg.get("tiene_alergias") != prev_alerg.get("tiene_alergias"):
-                confirms.append("Alergias: no")
-
-            asa = (updated_state.get("evaluacion_preoperatoria") or {}).get("asa") or updated_state.get("asa")
-            prev_asa = (current_state.get("evaluacion_preoperatoria") or {}).get("asa") if current_state else None
-            if asa and asa != prev_asa:
-                confirms.append(f"ASA: {asa}")
-
-            msg = ("Anoté: " + "; ".join(confirms) + ". ¿Seguimos?") if confirms \
-                else "Gracias. ¿Seguimos con la siguiente pregunta?"
-
-            self.wa_client.send_message(msg, sender_phone)
+            # Delegar decisión de avanzar/repreguntar al motor de pasos
+            reply_msg = compute_reply(current_state, updated_state)
+            self.wa_client.send_message(reply_msg, sender_phone)
             return {"status": "responded"}, 200
 
         except Exception as e:
             self.log.exception(f"🚨 Error procesando webhook: {e}")
             return {"status": "error_processing_webhook"}, 500
 
-    async def send_manual_message(self, request: MessageRequest) -> Dict[str, Any]: #ESTE ES UN def POR SI QUEREMOS MANDAR UN MENSAJE MANUALMENTE DESDE LA API
-        """Send a manual message to a WhatsApp user."""
+    async def send_manual_message(self, request: MessageRequest) -> Dict[str, Any]:
         try:
             self.wa_client.send_message(request.message, request.to)
             conversation_service.add_to_conversation_history(request.to, "assistant", request.message)
