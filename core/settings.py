@@ -20,6 +20,12 @@ TAKEOVER_FILE = Path(os.getenv("TAKEOVER_FILE", DATA_DIR / "takeover.flag"))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # si lo usas
 ENV = os.getenv("ENV", "production")
 
+# ---------- Google Drive / Productos ----------
+SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE", str(DATA_DIR / "gcp-sa.json"))
+PRODUCT_LIST_FILE_ID = os.getenv("PRODUCT_LIST_FILE_ID", "")  # <-- pon aquí el fileId real de tu sheet
+CATALOG_PDF_LINK = os.getenv("CATALOG_PDF_LINK", "")          # opcional
+PRODUCTS_CACHE_FILE = str(DATA_DIR / "products_cache.json")
+
 # ---------- objeto settings (compatibilidad) ----------
 class _Settings:
     # Paths
@@ -30,6 +36,11 @@ class _Settings:
     # Otros
     OPENAI_API_KEY: str | None = OPENAI_API_KEY
     ENV: str = ENV
+    # Drive/Productos
+    SERVICE_ACCOUNT_FILE: str = SERVICE_ACCOUNT_FILE
+    PRODUCT_LIST_FILE_ID: str = PRODUCT_LIST_FILE_ID
+    CATALOG_PDF_LINK: str = CATALOG_PDF_LINK
+    PRODUCTS_CACHE_FILE: str = PRODUCTS_CACHE_FILE
 
 settings = _Settings()
 
@@ -41,4 +52,8 @@ __all__ = [
     "OPENAI_API_KEY",
     "ENV",
     "settings",
+    "SERVICE_ACCOUNT_FILE",
+    "PRODUCT_LIST_FILE_ID",
+    "CATALOG_PDF_LINK",
+    "PRODUCTS_CACHE_FILE",
 ]
