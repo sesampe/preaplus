@@ -75,7 +75,7 @@ class WhatsAppRouter:
                 return "unsupported"
         return message_entry["text"]["body"]
     
-    async def is_valid_dni(message: str) -> str | None:
+    async def is_valid_dni(self, message: str) -> str | None:
         """
         Normaliza el DNI quitando espacios, puntos y pasando a mayúsculas.
         Devuelve el DNI normalizado si es válido, o None si no lo es.
