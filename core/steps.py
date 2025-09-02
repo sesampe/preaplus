@@ -93,8 +93,8 @@ def _now_date() -> date:
 # ===== Parsers locales por módulo =====
 
 def fill_from_text_modular(state: ConversationState, module_idx: int, text: str) -> Dict[str, Any]:
-    """Devuelve un patch dict (serializable) con lo que pudo extraer localmente.
-       Antibucle: si no se extrae nada, incrementa contador; si se extrae algo que llena requeridos, resetea."""
+    """Devuelve un patch (con raíz 'ficha.*') con lo que pudo extraer localmente.
+       Antibucle: si no se extrae nada, incrementa; si se llena algún requerido faltante, resetea."""
     patch: Dict[str, Any] = {}
     name = MODULES[module_idx]["name"]
 
@@ -151,11 +151,9 @@ def fill_from_text_modular(state: ConversationState, module_idx: int, text: str)
             _set(patch, "ficha.antropometria.imc", imc)
 
     elif name == "COBERTURA":
-        # libre para obra social y motivo; afiliado con 4+ alfanum
         afiliado = parse_afiliado(text)
         if afiliado:
             _set(patch, "ficha.cobertura.afiliado", afiliado)
-        # heurística para OS: toma todo el texto si no hay nada cargado aún
         t = (text or "").strip()
         if t and len(t) >= 3:
             if not state.ficha.cobertura.obra_social:
@@ -185,8 +183,7 @@ def fill_from_text_modular(state: ConversationState, module_idx: int, text: str)
 
     # —— antibucle: resetear sólo si llenamos algún requerido que faltaba
     if patch:
-        filled_required = any(_get({"ficha": patch}.get("ficha", {}), path) not in (None, "", [], {})
-                              for path in missing_before)
+        filled_required = any(_get(patch, path) not in (None, "", [], {}) for path in missing_before)
         if filled_required:
             _reset_retry(state, module_idx)
         else:
@@ -194,8 +191,7 @@ def fill_from_text_modular(state: ConversationState, module_idx: int, text: str)
     else:
         _inc_retry(state, module_idx)
 
-    # envoltura: devolvemos siempre con clave "ficha" como espera routes.py
-    return {"ficha": patch} if patch else {}
+    return patch  # <- OJO: sin envolver en {"ficha": ...}
 
 # ===== LLM prompts chicos por módulo =====
 
@@ -237,7 +233,6 @@ def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
     if name == "ALERGIA_MEDICACION":
         out = llm_client.call_llm_simple(_prompt_alergia_medicacion(text), max_tokens=200)
         data = _safe_parse_json(out) or {}
-        # Validación simple
         alergias = data.get("alergias") or {}
         tiene = bool(alergias.get("tiene_alergias"))
         detalle = alergias.get("detalle") or []
@@ -250,7 +245,6 @@ def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
         _set(patch, "ficha.alergia_medicacion", am)
 
     elif name == "ANTECEDENTES":
-        # Iteramos por sistemas con prompts chicos
         cardio_esquema = '{"cardio":{"hta":bool,"iam":bool,"falla_card":bool,"otros":[str]}}'
         resp_esquema = '{"respiratorio":{"epoc":bool,"asma":bool,"apnea_sueño":bool,"otros":[str]}}'
         endo_esquema = '{"endocrino":{"dm":bool,"hipotiroidismo":bool,"hipertiroidismo":bool,"otros":[str]}}'
@@ -275,7 +269,6 @@ def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
         out = llm_client.call_llm_simple(_prompt_complementarios(text), max_tokens=220)
         data = _safe_parse_json(out) or {}
         labs = data.get("labs") or {}
-        # rangos básicos si hay números
         if not hb_en_rango(labs.get("hb")):
             labs["hb"] = None
         if not plaquetas_en_rango(labs.get("plaquetas")):
@@ -302,24 +295,17 @@ def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
 
 def advance_module(state: ConversationState) -> Tuple[Optional[int], Optional[str]]:
     """Devuelve (next_idx, next_prompt) o (None, None) si terminó.
-       Antibucle: si supera MAX_RETRIES en un módulo obligatorio, muestra fallback y AVANZA."""
+       Antibucle: si supera MAX_RETRIES en un módulo obligatorio, AVANZA y pide el prompt del siguiente."""
     for i in range(state.module_idx, len(MODULES)):
         missing = _missing_required(state, i)
         if missing:
             retries = _retries(state, i)
             if retries >= MAX_RETRIES:
-                name = MODULES[i]["name"]
-                if name == "DNI":
-                    msg = ("No logré entender tu DNI tras varios intentos. "
-                           "Escribilo SOLO con números, sin puntos ni espacios. Ejemplo: 12345678. "
-                           "Si preferís, podés escribir 'cancelar' y retomamos más tarde.")
-                else:
-                    msg = ("No pude extraer datos válidos para este bloque. "
-                           "Probá con un formato más simple o decí 'saltar' para pasar al siguiente.")
-                _reset_retry(state, i)
                 # avanzar al próximo módulo para cortar cualquier loop
                 next_idx = min(i + 1, len(MODULES) - 1)
-                return next_idx, msg
+                _reset_retry(state, i)
+                # Pedimos directamente el prompt del siguiente módulo
+                return next_idx, prompt_for_module(next_idx)
             # caso normal: pedir input del módulo actual
             return i, prompt_for_module(i)
         # si el módulo actual no tiene faltantes, seguimos al próximo
@@ -351,7 +337,6 @@ def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> 
         if name == "DNI":
             d = patch.get("ficha", {}).get("dni")
             if not d:
-                # Mensaje claro cuando no se pudo extraer
                 return "No pude extraer un DNI. Escribilo SOLO con números, sin puntos ni espacios. Ej: 12345678"
             return f"Anoté DNI: {val(d)}"
         if name == "DATOS":
@@ -400,6 +385,6 @@ def merge_state(state: ConversationState, patch: Dict[str, Any]) -> Conversation
             else:
                 dst[k] = v
 
-    rec_merge(base, patch.get("ficha", {}))
+    rec_merge(base, patch.get("ficha", {}) if "ficha" in patch else patch)
     state.ficha = FichaPreanestesia(**base)
     return state
