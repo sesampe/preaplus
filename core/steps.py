@@ -15,15 +15,15 @@ MODULES = [
         "use_llm": True,  # fallback como respaldo
         "prompt": (
             "Completemos tus datos (copiá este bloque y rellená):\n\n"
-            "Nombre y apellido: ...\n"
-            "DNI (solo números): ...\n"
-            "Fecha nacimiento (dd/mm/aaaa): ...\n"
-            "Peso kg (ej 72.5): ...\n"
-            "Talla cm (ej 170): ...\n"
-            "Obra social: ...\n"
-            "N° afiliado: ...\n"
-            "Motivo de consulta (breve): ...\n\n"
-            "(Fecha de evaluación: ... )"  # opcional
+            "Nombre y apellido:\n"
+            "DNI (solo números):\n"
+            "Fecha nacimiento (dd/mm/aaaa):\n"
+            "Peso kg (ej 72.5):\n"
+            "Talla cm (ej 170):\n"
+            "Obra social:\n"
+            "N° afiliado:\n"
+            "Motivo de consulta (breve):\n\n"
+            "(Fecha de evaluación: )"  # opcional
         ),
     },
     {
@@ -148,7 +148,7 @@ _WEIGHT_FREE_RE = re.compile(r"(?:peso|pesa|kg)\D{0,5}(?P<peso>\d{1,3}(?:[.,]\d{
 _HEIGHT_FREE_CM_RE = re.compile(r"(?:mido|talla|altura|cm|mts?|metros?)\D{0,5}(?P<talla>\d{2,3})(?:[.,]\d+)?", re.IGNORECASE)
 _HEIGHT_FREE_M_RE = re.compile(r"\b(?P<metros>1(?:[.,]\d{1,2})|0[.,]\d{1,2})\s*m", re.IGNORECASE)
 _OS_FREE_RE = re.compile(r"(?:obra\s+social|prepaga|cobertura)\s*:?\s*[- ]*(?P<os>[A-Za-zÀ-ÿ0-9\. '\-]{2,})", re.IGNORECASE)
-_AFIL_FREE_RE = re.compile(r"(?:nro?\.?\s*afiliad[oa]|afiliad[oa])\s*:?\s*[- ]*(?P<afil>[A-Za-z0-9\-\.]{3,,})", re.IGNORECASE)
+_AFIL_FREE_RE = re.compile(r"(?:nro?\.?\s*afiliad[oa]|afiliad[oa])\s*:?\s*[- ]*(?P<afil>[A-Za-z0-9\-\.]{3,})", re.IGNORECASE)
 _MOTIVO_FREE_RE = re.compile(r"(?:motivo|cirug[ií]a|procedimiento)\s*:?\s*[- ]*(?P<motivo>[\wÀ-ÿ0-9,\. '\-]{3,})", re.IGNORECASE)
 
 
@@ -194,6 +194,29 @@ def _calc_imc(peso_kg: Optional[float], talla_cm: Optional[int]) -> Optional[flo
         return round(peso_kg / (m * m), 1)
     except Exception:
         return None
+
+
+def normalize_motivo_clinico(context_text: str, raw: Optional[str]) -> Optional[str]:
+    """Normaliza motivo libre a término médico simple.
+    - Heurística local rápida.
+    - Gancho para LLM: si querés, reemplazá o extendé esta función para llamar a tu modelo.
+    """
+    if not raw:
+        return None
+    s = raw.lower().strip()
+    # mapeos básicos
+    replacements = [
+        (r"apend", "apendicectomía"),
+        (r"ves[ií]cul", "colecistectomía"),
+        (r"colecist", "colecistectomía"),
+        (r"hernia inguinal", "hernioplastia inguinal"),
+        (r"catarat", "facoemulsificación de catarata"),
+    ]
+    for key, value in replacements:
+        if re.search(key, s):
+            return value
+    # Si no matchea nada, devolvemos capitalizado corto
+    return raw.strip().capitalize()
 
 
 # ---------------- MÓDULO 0: DATOS GENERALES ----------------
@@ -333,13 +356,16 @@ def _parse_generales(text: str) -> Dict[str, Any]:
     if antropo:
         ficha["antropometria"] = antropo
 
+    # Normalizar motivo clínico
+    motivo_norm = normalize_motivo_clinico(text, motivo_val) if motivo_val else None
+
     cobertura: Dict[str, Any] = {}
     if os_val:
         cobertura["obra_social"] = os_val
     if afiliado_val:
         cobertura["afiliado"] = afiliado_val
-    if motivo_val:
-        cobertura["motivo_cirugia"] = motivo_val
+    if motivo_norm:
+        cobertura["motivo_cirugia"] = motivo_norm
     if cobertura:
         ficha["cobertura"] = cobertura
 
@@ -501,7 +527,7 @@ def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> 
         lineas = [
             "✔️ Registré:",
             f"• { _fmt(nombre) } — DNI { _fmt(dni) }",
-            f"• Nac.: { _fmt(fnac) } ({ _fmt(edad) } años) — Eval.: { _fmt(feval) }",
+            f"• Nac.: { _fmt(fnac) } ({ _fmt(edad) } años) — Fecha de evaluación: { _fmt(feval) }",
             f"• Peso { _fmt(peso) } kg, Talla { _fmt(talla) } cm, IMC { _fmt(imc) }",
             f"• Obra social: { _fmt(os_) } — Afiliado: { _fmt(afil) }",
             f"• Motivo: { _fmt(motivo) }",
