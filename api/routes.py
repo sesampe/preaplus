@@ -147,7 +147,7 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[list[str], Conve
     if patch_local:
         state = merge_state(state, {"ficha": patch_local.get("ficha", patch_local)})
 
-    # 2) Patch LLM (si el módulo lo usa) — ahora también EXTRAEMOS datos libres del módulo 0,
+    # 2) Patch LLM (si el módulo lo usa) — EXTRAEMOS datos libres del módulo 0,
     #    además de normalizar el motivo.
     patch_llm: Dict[str, Any] = {}
     if 0 <= module_idx < len(MODULES) and MODULES[module_idx].get("use_llm"):
@@ -203,23 +203,33 @@ async def webhook(req: Request):
     if message_id:
         state._handled_msg_ids.add(message_id)
 
-    # Primer contacto: SIEMPRE saludar + formulario (sin importar qué escribió)
+    replies: list[str] = []
+
+    # Primer contacto: decidir según si el primer mensaje ya trae datos
     if not state._has_greeted:
-        saludo = (
-            "Hola, vamos a completar tu ficha anestesiologica.\n\n"
-            "COPIA, PEGA Y RELLENA CON TUS DATOS EL SIGUIENTE FORMULARIO"
-        )
+        # preview parse: ¿hay algo útil en el texto entrante?
+        preview = fill_from_text_modular(state, state.module_idx, text or "") or {}
+        has_data = bool(preview and (preview.get("ficha") or preview))
+
         state._has_greeted = True
         save_state(state)
-        # no procesamos el texto inicial; empezamos por el Módulo 0
-        return JSONResponse({
-            "to": user_id,
-            "echo_text": text,
-            "replies": [saludo, MODULES[0]["prompt"]],
-            "sent": [bool(wa_client.send_message(message=saludo, recipient_id=user_id)),
-                     bool(wa_client.send_message(message=MODULES[0]['prompt'], recipient_id=user_id))],
-            "module": MODULES[state.module_idx]["name"],
-        })
+
+        if not has_data:
+            saludo = (
+                "Hola, vamos a completar tu ficha anestesiologica.\n\n"
+                "COPIA, PEGA Y RELLENA CON TUS DATOS EL SIGUIENTE FORMULARIO"
+            )
+            # Mandamos saludo + formulario y no procesamos más
+            wa_client.send_message(message=saludo, recipient_id=user_id)
+            wa_client.send_message(message=MODULES[0]['prompt'], recipient_id=user_id)
+            return JSONResponse({
+                "to": user_id,
+                "echo_text": text,
+                "replies": [saludo, MODULES[0]["prompt"]],
+                "sent": [True, True],
+                "module": MODULES[state.module_idx]["name"],
+            })
+        # Si trae datos, seguimos al triage normal usando ese mismo texto.
 
     # Anti-bucle
     if text == state._last_text and state._last_failed_module == state.module_idx:
@@ -231,7 +241,7 @@ async def webhook(req: Request):
     state._last_text = text
 
     sent = []
-    for msg in (messages or []):
+    for msg in (replies + messages):
         if not msg:
             continue
         try:
@@ -243,7 +253,7 @@ async def webhook(req: Request):
     return JSONResponse({
         "to": user_id,
         "echo_text": text,
-        "replies": messages,
+        "replies": replies + messages,
         "sent": sent,
         "module": MODULES[state.module_idx]["name"] if 0 <= state.module_idx < len(MODULES) else None,
     })
