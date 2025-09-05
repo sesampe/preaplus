@@ -36,16 +36,11 @@ def load_state(user_id: str) -> ConversationState:
         st.module_idx = 0
         _USER_STATE[user_id] = st
     # compat
-    if not hasattr(st, "_handled_msg_ids"):
-        st._handled_msg_ids = set()
-    if not hasattr(st, "_last_text"):
-        st._last_text = ""
-    if not hasattr(st, "_last_failed_module"):
-        st._last_failed_module = None
-    if not hasattr(st, "_has_greeted"):
-        st._has_greeted = False
-    if not hasattr(st, "module_idx") or st.module_idx is None:
-        st.module_idx = 0
+    if not hasattr(st, "_handled_msg_ids"): st._handled_msg_ids = set()
+    if not hasattr(st, "_last_text"): st._last_text = ""
+    if not hasattr(st, "_last_failed_module"): st._last_failed_module = None
+    if not hasattr(st, "_has_greeted"): st._has_greeted = False
+    if not hasattr(st, "module_idx") or st.module_idx is None: st.module_idx = 0
     return st
 
 def save_state(state: ConversationState):
@@ -86,12 +81,9 @@ def _extract_incoming(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
 def _dig(obj: Any, path: list[str]) -> Any:
     cur = obj
     for k in path:
-        if cur is None:
-            return None
-        if isinstance(cur, dict):
-            cur = cur.get(k)
-        else:
-            cur = getattr(cur, k, None)
+        if cur is None: return None
+        if isinstance(cur, dict): cur = cur.get(k)
+        else: cur = getattr(cur, k, None)
     return cur
 
 def _to_dict(obj: Any) -> Any:
@@ -138,6 +130,24 @@ def _missing_form_snippet(missing: list[str]) -> str:
     lines = [mapping[m] for m in missing if m in mapping]
     return "\n".join(lines)
 
+def _count_core_fields_in_patch(preview: Dict[str, Any]) -> int:
+    """
+    Cuenta solo los campos núcleo dentro de preview['ficha'].
+    Evita considerar '_start' u otras claves fuera de 'ficha'
+    para decidir si el primer mensaje trae info suficiente.
+    """
+    p = preview.get("ficha", {}) if isinstance(preview, dict) else {}
+    c = 0
+    if _has(p.get("dni")): c += 1
+    if _has(_dig(p, ["datos", "nombre_completo"])): c += 1
+    if _has(_dig(p, ["datos", "fecha_nacimiento"])): c += 1
+    if _has(_dig(p, ["antropometria", "peso_kg"])): c += 1
+    if _has(_dig(p, ["antropometria", "talla_cm"])): c += 1
+    if _has(_dig(p, ["cobertura", "obra_social"])): c += 1
+    if _has(_dig(p, ["cobertura", "afiliado"])): c += 1
+    if _has(_dig(p, ["cobertura", "motivo_cirugia"])): c += 1
+    return c
+
 # ====== Core TRIAGE ======
 def _triage_block(state: ConversationState, text: str) -> Tuple[list[str], ConversationState]:
     module_idx = state.module_idx
@@ -147,8 +157,7 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[list[str], Conve
     if patch_local:
         state = merge_state(state, {"ficha": patch_local.get("ficha", patch_local)})
 
-    # 2) Patch LLM (si el módulo lo usa) — EXTRAEMOS datos libres del módulo 0,
-    #    además de normalizar el motivo.
+    # 2) Patch LLM (si el módulo lo usa)
     patch_llm: Dict[str, Any] = {}
     if 0 <= module_idx < len(MODULES) and MODULES[module_idx].get("use_llm"):
         patch_llm = llm_parse_modular(text or "", module_idx) or {}
@@ -164,9 +173,8 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[list[str], Conve
     if module_idx == 0:
         faltan = _missing_mod0_required(state)
         if faltan:
-            # no avanzar; explicar y pedir solo lo faltante
-            if confirm:  # solo si hay algo para mostrar
-                messages.append(confirm)
+            if confirm:
+                messages.append(confirm)  # mostrar solo lo que sí obtuvimos
             messages.append("Me faltó completar estos campos. Copiá y pegá este mini-formulario y rellenalo:")
             messages.append(_missing_form_snippet(faltan))
             state._last_failed_module = module_idx
@@ -179,10 +187,7 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[list[str], Conve
     # 5) Siguiente prompt
     next_idx, next_prompt = advance_module(state)
     if next_idx is None:
-        if confirm:
-            messages.append(f"{confirm} ¡Listo! Completamos todos los bloques.")
-        else:
-            messages.append("¡Listo! Completamos todos los bloques.")
+        messages.append(f"{confirm} ¡Listo! Completamos todos los bloques." if confirm else "¡Listo! Completamos todos los bloques.")
     else:
         if confirm:
             messages.append(confirm)
@@ -208,24 +213,28 @@ async def webhook(req: Request):
     if message_id:
         state._handled_msg_ids.add(message_id)
 
-    # Primer contacto: SIEMPRE saludar. Si no trae datos, enviar formulario.
+    # Primer contacto: SIEMPRE saludar y decidir si pedir formulario completo
     if not state._has_greeted:
-        saludo = (
-            "Hola, vamos a completar tu ficha anestesiologica."
-        )
-        wa_client.send_message(message=saludo, recipient_id=user_id)
+        saludo = "Hola, vamos a completar tu ficha anestesiologica."
+        try: wa_client.send_message(message=saludo, recipient_id=user_id)
+        except Exception: pass
 
         state._has_greeted = True
         save_state(state)
 
+        # preview SOLO con regex locales; contamos campos reales
         preview = fill_from_text_modular(state, state.module_idx, text or "") or {}
-        has_data = bool(preview and (preview.get("ficha") or preview))
-        if not has_data:
-            wa_client.send_message(
-                message="COPIA, PEGA Y RELLENA CON TUS DATOS EL SIGUIENTE FORMULARIO",
-                recipient_id=user_id,
-            )
-            wa_client.send_message(message=MODULES[0]['prompt'], recipient_id=user_id)
+        count = _count_core_fields_in_patch(preview)
+
+        if count < 3:
+            try:
+                wa_client.send_message(
+                    message="COPIA, PEGA Y RELLENA CON TUS DATOS EL SIGUIENTE FORMULARIO",
+                    recipient_id=user_id,
+                )
+                wa_client.send_message(message=MODULES[0]['prompt'], recipient_id=user_id)
+            except Exception:
+                pass
             return JSONResponse({
                 "to": user_id,
                 "echo_text": text,
@@ -233,7 +242,7 @@ async def webhook(req: Request):
                 "sent": [True, True, True],
                 "module": MODULES[state.module_idx]["name"],
             })
-        # Si trae datos, seguimos al triage normal con ese mismo texto.
+        # Si trae >=3 campos, seguimos al triage normal con ese mismo texto.
 
     # Anti-bucle
     if text == state._last_text and state._last_failed_module == state.module_idx:
@@ -246,8 +255,7 @@ async def webhook(req: Request):
 
     sent = []
     for msg in (messages or []):
-        if not msg:
-            continue
+        if not msg: continue
         try:
             wa_client.send_message(message=msg, recipient_id=user_id)
             sent.append(True)
