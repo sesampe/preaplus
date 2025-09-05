@@ -37,7 +37,7 @@ def load_state(user_id: str) -> ConversationState:
         st._last_text = ""                    # último texto que vimos
         st._last_failed_module = None         # módulo en el que dijimos “No pude…” por última vez
         _USER_STATE[user_id] = st
-    # compatibilidad si venís de un estado viejo
+    # compat si venís de un estado viejo
     if not hasattr(st, "_handled_msg_ids"):
         st._handled_msg_ids = set()
     if not hasattr(st, "_last_text"):
@@ -100,12 +100,12 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[Optional[str], C
 
     # 2) Patch LLM (si el módulo lo usa)
     patch_llm: Dict[str, Any] = {}
-    if MODULES[module_idx]["use_llm"]:
+    if 0 <= module_idx < len(MODULES) and MODULES[module_idx].get("use_llm"):
         patch_llm = llm_parse_modular(text or "", module_idx) or {}
         if patch_llm:
             state = merge_state(state, {"ficha": patch_llm.get("ficha", patch_llm)})
 
-    # 3) Confirmación
+    # 3) Confirmación (combinado para el mensaje)
     combined = {"ficha": {}}
     if patch_local:
         combined["ficha"].update(patch_local.get("ficha", patch_local))
@@ -113,24 +113,30 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[Optional[str], C
         combined["ficha"].update(patch_llm.get("ficha", patch_llm))
 
     had_any = bool(combined["ficha"])
-    if had_any:
-        confirm = summarize_patch_for_confirmation(combined, module_idx)
-    else:
-        confirm = "No pude extraer datos de este bloque."
+    confirm = summarize_patch_for_confirmation(combined, module_idx) if had_any else "No pude extraer datos de este bloque."
 
-    # 4) Avance: solo si hubo algo
-    if had_any:
+    # 4) LÓGICA DE AVANCE
+    #    => Si estamos en módulo 0 y el patch es SOLO "_start", NO avanzar.
+    start_only = (
+        module_idx == 0
+        and isinstance(combined.get("ficha"), dict)
+        and set(combined["ficha"].keys()) == {"_start"}
+    )
+    advance_now = had_any and not start_only
+
+    if advance_now:
         state.module_idx = min(state.module_idx + 1, len(MODULES) - 1)
-        state._last_failed_module = None  # reseteamos “fallo”
+        state._last_failed_module = None
     else:
-        # Marcamos que este módulo falló para poder evitar spam si el texto no cambia
-        state._last_failed_module = module_idx
+        # Si no hubo datos (o era solo _start), marcamos fallo solo si realmente no hubo nada útil
+        state._last_failed_module = None if start_only else module_idx
 
     # 5) Siguiente prompt
     next_idx, next_prompt = advance_module(state)
     if next_idx is None:
         reply = f"{confirm} ¡Listo! Completamos todos los bloques."
     else:
+        # nos aseguramos de preguntar el prompt del módulo actual
         state.module_idx = next_idx
         reply = f"{confirm} {next_prompt}"
     return reply, state
@@ -157,8 +163,6 @@ async def webhook(req: Request):
         state._handled_msg_ids.add(message_id)
 
     # --- Anti-spam “No pude…” ---
-    # Si el texto es idéntico al anterior, y el último intento ya falló en este módulo,
-    # no volvemos a responder (evita el bucle si Meta reintenta con el mismo payload).
     if text == state._last_text and state._last_failed_module == state.module_idx:
         return JSONResponse({"ok": True, "ignored": "same_text_same_module"})
 
