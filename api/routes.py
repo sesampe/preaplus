@@ -53,15 +53,13 @@ def save_state(state: ConversationState):
 
 # ====== Helpers ======
 def _extract_incoming(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
-    """
-    Devuelve (text, message_id) o ("__IGNORE__", None) si no hay que responder.
-    Ignora 'statuses' y tipos no-text.
-    """
+    """Devuelve (text, message_id) o ("__IGNORE__", None) si no hay que responder."""
     try:
         entry = payload.get("entry", [])[0]
         change = entry.get("changes", [])[0]
         value = change.get("value", {})
 
+        # Ignorar callbacks de status de WhatsApp
         if value.get("statuses"):
             return "__IGNORE__", None
 
@@ -78,11 +76,24 @@ def _extract_incoming(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     except Exception:
         pass
 
+    # Variantes de test locales
     text = payload.get("text") or payload.get("message") or payload.get("body") or ""
     mid = payload.get("message_id")
     if not text:
         return "__IGNORE__", mid
     return text, mid
+
+# ---- getters tolerantes a dict / pydantic ----
+def _dig(obj: Any, path: list[str]) -> Any:
+    cur = obj
+    for k in path:
+        if cur is None:
+            return None
+        if isinstance(cur, dict):
+            cur = cur.get(k)
+        else:
+            cur = getattr(cur, k, None)
+    return cur
 
 def _has(v):
     return v not in (None, "", [], {})
@@ -90,22 +101,17 @@ def _has(v):
 def _missing_mod0_required(state) -> list[str]:
     """
     Valida que estén los obligatorios del módulo 0 en el estado ACTUAL.
-    Si la fecha es inválida, no existirá en 'datos.fecha_nacimiento' y la pedimos.
+    Si la fecha es inválida, 'datos.fecha_nacimiento' no existirá y se pedirá.
     """
-    f = getattr(state, "ficha", {}) or {}
-    datos = f.get("datos", {}) if isinstance(f.get("datos"), dict) else {}
-    antropo = f.get("antropometria", {}) if isinstance(f.get("antropometria"), dict) else {}
-    cob = f.get("cobertura", {}) if isinstance(f.get("cobertura"), dict) else {}
-
     missing = []
-    if not _has(f.get("dni")): missing.append("DNI (solo números)")
-    if not _has(datos.get("nombre_completo")): missing.append("Nombre y apellido")
-    if not _has(datos.get("fecha_nacimiento")): missing.append("Fecha nacimiento (dd/mm/aaaa)")
-    if not _has(antropo.get("peso_kg")): missing.append("Peso kg")
-    if not _has(antropo.get("talla_cm")): missing.append("Talla cm")
-    if not _has(cob.get("obra_social")): missing.append("Obra social")
-    if not _has(cob.get("afiliado")): missing.append("N° afiliado")
-    if not _has(cob.get("motivo_cirugia")): missing.append("Motivo de consulta")
+    if not _has(_dig(state, ["ficha", "dni"])): missing.append("DNI (solo números)")
+    if not _has(_dig(state, ["ficha", "datos", "nombre_completo"])): missing.append("Nombre y apellido")
+    if not _has(_dig(state, ["ficha", "datos", "fecha_nacimiento"])): missing.append("Fecha nacimiento (dd/mm/aaaa)")
+    if not _has(_dig(state, ["ficha", "antropometria", "peso_kg"])): missing.append("Peso kg")
+    if not _has(_dig(state, ["ficha", "antropometria", "talla_cm"])): missing.append("Talla cm")
+    if not _has(_dig(state, ["ficha", "cobertura", "obra_social"])): missing.append("Obra social")
+    if not _has(_dig(state, ["ficha", "cobertura", "afiliado"])): missing.append("N° afiliado")
+    if not _has(_dig(state, ["ficha", "cobertura", "motivo_cirugia"])): missing.append("Motivo de consulta")
     return missing
 
 # ====== Core TRIAGE ======
