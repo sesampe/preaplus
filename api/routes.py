@@ -2,7 +2,6 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from typing import Dict, Any, Tuple, Optional
 from datetime import datetime
-import re
 
 from core.settings import HEYOO_PHONE_ID, HEYOO_TOKEN
 from heyoo import WhatsApp
@@ -20,10 +19,10 @@ from core.steps import (
 router = APIRouter()
 wa_client = WhatsApp(token=HEYOO_TOKEN, phone_number_id=HEYOO_PHONE_ID)
 
-# Hardcodeá tu número acá
+# Hardcodeá tu número de prueba acá
 HARDCODED_USER_ID = "542616463629"
 
-# ====== Memoria simple ======
+# ====== Memoria simple en-proc ======
 _USER_STATE: Dict[str, ConversationState] = {}
 
 def load_state(user_id: str) -> ConversationState:
@@ -33,6 +32,7 @@ def load_state(user_id: str) -> ConversationState:
         st._handled_msg_ids = set()
         st._last_text = ""
         st._last_failed_module = None
+        st._has_greeted = False
         st.module_idx = 0
         _USER_STATE[user_id] = st
     # compat
@@ -42,6 +42,8 @@ def load_state(user_id: str) -> ConversationState:
         st._last_text = ""
     if not hasattr(st, "_last_failed_module"):
         st._last_failed_module = None
+    if not hasattr(st, "_has_greeted"):
+        st._has_greeted = False
     if not hasattr(st, "module_idx") or st.module_idx is None:
         st.module_idx = 0
     return st
@@ -52,14 +54,13 @@ def save_state(state: ConversationState):
 
 # ====== Helpers ======
 def _extract_incoming(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
-    """Devuelve (text, message_id) o ("__IGNORE__", None) si no hay que responder."""
+    """Devuelve (text, message_id) o ('__IGNORE__', None) si es status/otro tipo."""
     try:
         entry = payload.get("entry", [])[0]
         change = entry.get("changes", [])[0]
         value = change.get("value", {})
 
-        # Ignorar callbacks de status de WhatsApp
-        if value.get("statuses"):
+        if value.get("statuses"):  # callbacks de delivery/read
             return "__IGNORE__", None
 
         msgs = value.get("messages") or []
@@ -75,14 +76,13 @@ def _extract_incoming(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     except Exception:
         pass
 
-    # Variantes de test locales
+    # modo test local
     text = payload.get("text") or payload.get("message") or payload.get("body") or ""
     mid = payload.get("message_id")
     if not text:
         return "__IGNORE__", mid
     return text, mid
 
-# ---- getters / dictify tolerantes a Pydantic ----
 def _dig(obj: Any, path: list[str]) -> Any:
     cur = obj
     for k in path:
@@ -97,13 +97,10 @@ def _dig(obj: Any, path: list[str]) -> Any:
 def _to_dict(obj: Any) -> Any:
     if isinstance(obj, dict):
         return {k: _to_dict(v) for k, v in obj.items()}
-    # pydantic v2
-    if hasattr(obj, "model_dump"):
+    if hasattr(obj, "model_dump"):  # pydantic v2
         return obj.model_dump()
-    # pydantic v1
-    if hasattr(obj, "dict"):
+    if hasattr(obj, "dict"):  # pydantic v1
         return obj.dict()
-    # objetos simples
     if hasattr(obj, "__dict__"):
         return {k: _to_dict(v) for k, v in vars(obj).items()}
     if isinstance(obj, (list, tuple)):
@@ -114,11 +111,7 @@ def _has(v):
     return v not in (None, "", [], {})
 
 def _missing_mod0_required(state) -> list[str]:
-    """
-    Valida que estén los obligatorios del módulo 0 en el estado ACTUAL.
-    Si la fecha es inválida, 'datos.fecha_nacimiento' no existirá y se pedirá.
-    Retorna *nombres lógicos* de campos.
-    """
+    """Valida obligatorios del módulo 0 en el estado actual."""
     missing = []
     if not _has(_dig(state, ["ficha", "dni"])): missing.append("DNI (solo números)")
     if not _has(_dig(state, ["ficha", "datos", "nombre_completo"])): missing.append("Nombre y apellido")
@@ -131,10 +124,7 @@ def _missing_mod0_required(state) -> list[str]:
     return missing
 
 def _missing_form_snippet(missing: list[str]) -> str:
-    """
-    Devuelve solo las líneas del formulario correspondientes a los campos faltantes.
-    En **negrita** (WhatsApp: *texto*).
-    """
+    """Snippet de solo los campos faltantes en negrita (WhatsApp: *texto*)."""
     mapping = {
         "Nombre y apellido": "*Nombre y apellido:*",
         "DNI (solo números)": "*DNI (solo números):*",
@@ -149,7 +139,7 @@ def _missing_form_snippet(missing: list[str]) -> str:
     return "\n".join(lines)
 
 # ====== Core TRIAGE ======
-def _triage_block(state: ConversationState, text: str) -> Tuple[Optional[list[str]], ConversationState]:
+def _triage_block(state: ConversationState, text: str) -> Tuple[list[str], ConversationState]:
     module_idx = state.module_idx
 
     # 1) Patch local (regex/fallbacks)
@@ -157,7 +147,7 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[Optional[list[st
     if patch_local:
         state = merge_state(state, {"ficha": patch_local.get("ficha", patch_local)})
 
-    # 2) Patch LLM (si el módulo lo usa) — aquí puede normalizar el motivo
+    # 2) Patch LLM (si el módulo lo usa) — normaliza motivo quirúrgico
     patch_llm: Dict[str, Any] = {}
     if 0 <= module_idx < len(MODULES) and MODULES[module_idx].get("use_llm"):
         patch_llm = llm_parse_modular(text or "", module_idx) or {}
@@ -165,52 +155,32 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[Optional[list[st
             state = merge_state(state, {"ficha": patch_llm.get("ficha", patch_llm)})
 
     # 3) Confirmación basada en TODO el estado acumulado
-    state_snapshot = {"ficha": _to_dict(getattr(state, "ficha", {}))}
-    confirm = summarize_patch_for_confirmation(state_snapshot, module_idx)
+    snapshot = {"ficha": _to_dict(getattr(state, "ficha", {}))}
+    confirm = summarize_patch_for_confirmation(snapshot, module_idx)
 
-    # 4) Lógica de avance
-    start_only = (
-        module_idx == 0
-        and isinstance(patch_local.get("ficha", patch_local), dict)
-        and set(patch_local.get("ficha", patch_local).keys()) == {"_start"}
-    )
-    advance_now = not start_only
-
+    # 4) Lógica de avance y faltantes (solo módulo 0)
     messages: list[str] = []
-
-    # En módulo 0: no avanzar si faltan obligatorios. Mandar SOLO snippet bold.
-    if module_idx == 0 and not start_only:
+    if module_idx == 0:
         faltan = _missing_mod0_required(state)
         if faltan:
-            advance_now = False
+            # no avanzar; explicar y pedir solo lo faltante
             messages.append(confirm)
+            messages.append("Me faltó completar estos campos. Copiá y pegá este mini-formulario y rellenalo:")
             messages.append(_missing_form_snippet(faltan))
+            state._last_failed_module = module_idx
             return messages, state
 
-    if advance_now:
-        state.module_idx = min(state.module_idx + 1, len(MODULES) - 1)
-        state._last_failed_module = None
-    else:
-        state._last_failed_module = None if start_only else module_idx
+    # Si no faltan, avanzamos
+    state.module_idx = min(state.module_idx + 1, len(MODULES) - 1)
+    state._last_failed_module = None
 
-    # 5) Mensajes a enviar
-    if start_only:
-        # Saludo + formulario en mensajes separados
-        saludo = (
-            "Hola, vamos a completar tu ficha anestesiologica.\n\n"
-            "COPIA, PEGA Y RELLENA CON TUS DATOS EL SIGUIENTE FORMULARIO"
-        )
-        messages.append(saludo)
-        messages.append(MODULES[0]["prompt"])
-        return messages, state
-
+    # 5) Siguiente prompt
     next_idx, next_prompt = advance_module(state)
     if next_idx is None:
         messages.append(f"{confirm} ¡Listo! Completamos todos los bloques.")
     else:
         messages.append(confirm)
         messages.append(next_prompt)
-        state.module_idx = next_idx
 
     return messages, state
 
@@ -226,16 +196,35 @@ async def webhook(req: Request):
     user_id = HARDCODED_USER_ID
     state = load_state(user_id)
 
-    # Desduplicación
+    # Desduplicación básica
     if message_id and message_id in state._handled_msg_ids:
         return JSONResponse({"ok": True, "ignored": "duplicate_message"})
     if message_id:
         state._handled_msg_ids.add(message_id)
 
+    # Primer contacto: SIEMPRE saludar + formulario (sin importar qué escribió)
+    if not state._has_greeted:
+        saludo = (
+            "Hola, vamos a completar tu ficha anestesiologica.\n\n"
+            "COPIA, PEGA Y RELLENA CON TUS DATOS EL SIGUIENTE FORMULARIO"
+        )
+        state._has_greeted = True
+        save_state(state)
+        # no procesamos el texto inicial; empezamos por el Módulo 0
+        return JSONResponse({
+            "to": user_id,
+            "echo_text": text,
+            "replies": [saludo, MODULES[0]["prompt"]],
+            "sent": [bool(wa_client.send_message(message=saludo, recipient_id=user_id)),
+                     bool(wa_client.send_message(message=MODULES[0]['prompt'], recipient_id=user_id))],
+            "module": MODULES[state.module_idx]["name"],
+        })
+
     # Anti-bucle
     if text == state._last_text and state._last_failed_module == state.module_idx:
         return JSONResponse({"ok": True, "ignored": "same_text_same_module"})
 
+    # Triage normal
     messages, state = _triage_block(state, text)
     save_state(state)
     state._last_text = text
