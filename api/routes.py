@@ -19,7 +19,7 @@ from core.steps import (
 router = APIRouter()
 wa_client = WhatsApp(token=HEYOO_TOKEN, phone_number_id=HEYOO_PHONE_ID)
 
-# Hardcodeá tu número de prueba acá
+# Número de prueba (ajustá al tuyo)
 HARDCODED_USER_ID = "542616463629"
 
 # ====== Memoria simple en-proc ======
@@ -133,8 +133,6 @@ def _missing_form_snippet(missing: list[str]) -> str:
 def _count_core_fields_in_patch(preview: Dict[str, Any]) -> int:
     """
     Cuenta solo los campos núcleo dentro de preview['ficha'].
-    Evita considerar '_start' u otras claves fuera de 'ficha'
-    para decidir si el primer mensaje trae info suficiente.
     """
     p = preview.get("ficha", {}) if isinstance(preview, dict) else {}
     c = 0
@@ -164,11 +162,11 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[list[str], Conve
         if patch_llm:
             state = merge_state(state, {"ficha": patch_llm.get("ficha", patch_llm)})
 
-    # 3) Confirmación basada en TODO el estado acumulado
+    # 3) Confirmación
     snapshot = {"ficha": _to_dict(getattr(state, "ficha", {}))}
     confirm = summarize_patch_for_confirmation(snapshot, module_idx)
 
-    # 4) Lógica de avance y faltantes (solo módulo 0)
+    # 4) Faltantes (solo módulo 0)
     messages: list[str] = []
     if module_idx == 0:
         faltan = _missing_mod0_required(state)
@@ -180,11 +178,10 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[list[str], Conve
             state._last_failed_module = module_idx
             return messages, state
 
-    # Si no faltan, avanzamos
+    # Avanzar
     state.module_idx = min(state.module_idx + 1, len(MODULES) - 1)
     state._last_failed_module = None
 
-    # 5) Siguiente prompt
     next_idx, next_prompt = advance_module(state)
     if next_idx is None:
         messages.append(f"{confirm} ¡Listo! Completamos todos los bloques." if confirm else "¡Listo! Completamos todos los bloques.")
@@ -207,7 +204,7 @@ async def webhook(req: Request):
     user_id = HARDCODED_USER_ID
     state = load_state(user_id)
 
-    # Desduplicación básica
+    # Desduplicación
     if message_id and message_id in state._handled_msg_ids:
         return JSONResponse({"ok": True, "ignored": "duplicate_message"})
     if message_id:
@@ -242,7 +239,7 @@ async def webhook(req: Request):
                 "sent": [True, True, True],
                 "module": MODULES[state.module_idx]["name"],
             })
-        # Si trae >=3 campos, seguimos al triage normal con ese mismo texto.
+        # Si trae ≥3 campos, seguimos al triage con ese mismo texto.
 
     # Anti-bucle
     if text == state._last_text and state._last_failed_module == state.module_idx:
