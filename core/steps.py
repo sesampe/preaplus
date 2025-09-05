@@ -485,11 +485,96 @@ def fill_from_text_modular(state: Any, module_idx: int, text: str) -> Dict[str, 
 
 
 def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
-    """Parser de respaldo: pedir al LLM solo si el módulo lo permite y regex no extrajo nada."""
-    # Instrucción resumida para tu agente LLM (se envía desde tu servicio llamador)
-    # "Extraé: nombre_apellido, dni (solo dígitos), fecha_nacimiento (dd/mm/aaaa), peso_kg, talla_cm, obra_social, afiliado, motivo_consulta (máx 200), fecha_evaluacion.\n"
-    # "Devolvé JSON con la forma de FichaPreanestesia anidada. No inventes."
-    return {}
+    """
+    Parser LLM. Para el Módulo 0, SIEMPRE intenta normalizar el motivo de cirugía
+    aunque las regex locales hayan capturado algo. Para otros módulos, no hace nada.
+    Requiere OPENAI_API_KEY (y opcional OPENAI_MODEL).
+    """
+    if module_idx != 0:
+        return {}
+
+    import os, re
+
+    # 1) Sacar un candidato de motivo desde el texto (para dar contexto al LLM)
+    candidate = None
+    m = re.search(r"(?im)^motivo.*?:\s*(.+)$", text or "")
+    if m:
+        candidate = m.group(1).strip()
+    if not candidate:
+        m2 = re.search(
+            r"(oper(ar|aci[oó]n)|sac(ar|an)|extirpar|quitar|me\s+hacen|intervenci[oó]n)[:\s,-]*([^\n]+)",
+            text or "",
+            re.IGNORECASE,
+        )
+        if m2:
+            candidate = (m2.group(3) or "").strip()[:120]
+
+    # Si no hay nada razonable, no llamamos al LLM
+    if not candidate:
+        return {}
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {}
+
+    prompt = (
+        "Eres un asistente clínico. Lee el texto y devuelve SOLO un término quirúrgico "
+        "estandarizado en español (con tildes), sin explicaciones ni signos extra. "
+        "Si no puedes inferirlo, responde NULL.\n\n"
+        f"Texto completo:\n{text}\n\n"
+        f"Motivo libre detectado: {candidate}\n\n"
+        "Ejemplos:\n"
+        "- 'me sacan la vesicula' -> colecistectomía\n"
+        "- 'me operan de cataratas' -> facoemulsificación de catarata\n"
+        "- 'me sacan un tumor de la mama' -> tumorectomía\n"
+        "- 'me quitan la mama izquierda' -> mastectomía\n"
+        "- 'hernia en la ingle' -> hernioplastia inguinal\n"
+    )
+
+    term = None
+    try:
+        # SDK nuevo
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        rsp = client.chat.completions.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            messages=[
+                {"role": "system", "content": "Responde solo con el término clínico."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+            max_tokens=16,
+        )
+        term = (rsp.choices[0].message.content or "").strip()
+    except Exception:
+        try:
+            # SDK viejo
+            import openai  # type: ignore
+            openai.api_key = api_key
+            rsp = openai.ChatCompletion.create(
+                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                messages=[
+                    {"role": "system", "content": "Responde solo con el término clínico."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0,
+                max_tokens=16,
+            )
+            term = (rsp["choices"][0]["message"]["content"] or "").strip()
+        except Exception:
+            term = None
+
+    if not term or term.upper() == "NULL":
+        return {}
+
+    # limpiar artefactos
+    term = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s\-]", "", term).strip()
+    if not term:
+        return {}
+
+    # Patch mínimo que sobreescribe lo local
+    return {"ficha": {"cobertura": {"motivo_cirugia": term}}}
+
 
 
 def _fmt(v: Any) -> str:
