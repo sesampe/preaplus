@@ -7,12 +7,12 @@ from datetime import datetime, date
 # ============================================================================
 # Definición de MÓDULOS (en orden)
 #   >> Módulo 0 unifica: DNI + Datos personales + Antropometría + Cobertura/Motivo
-#      con prompt "regex-friendly" para WhatsApp. El resto de módulos siguen igual.
+#      con prompt "regex-friendly" para WhatsApp.
 # ============================================================================
 MODULES = [
     {
         "name": "Datos generales",
-        "use_llm": True,  # LLM puede usarse en rutas para normalizar motivo
+        "use_llm": True,  # el LLM podrá normalizar el motivo (lo orquesta routes.py)
         "prompt": (
             "Nombre y apellido:\n"
             "DNI (solo números):\n"
@@ -119,14 +119,12 @@ _RE_NOMBRE = re.compile(
 )
 _RE_DNI_LABELED = re.compile(r"^dni.*?:\s*([0-9][0-9.\s]{5,})$", _RE_FLAGS)
 _RE_FNAC = re.compile(r"^fecha nacimiento.*?:\s*(\d{1,2}/\d{1,2}/\d{4})$", _RE_FLAGS)
-# Acepta 170, 1.70 o 1,70; el "cm" no es obligatorio
 _RE_PESO = re.compile(r"^peso.*?kg.*?:\s*([0-9]{1,3}(?:[.,][0-9]{1,2})?)$", _RE_FLAGS)
+# acepta 170, 1.70 o 1,70 (sin obligar "cm")
 _RE_TALLA = re.compile(r"^talla.*?:\s*([0-9]{1,3}(?:[.,][0-9]{1,2})?)$", _RE_FLAGS)
 _RE_OS = re.compile(r"^obra social:\s*([A-Za-zÁÉÍÓÚÜÑñ0-9 .,'\-]{2,60})$", _RE_FLAGS)
 _RE_AFIL = re.compile(r"^(?:n°|nº|num(?:ero)?)[\s_-]*afiliad[oa]:\s*([A-Za-z0-9\-./]{3,30})$", _RE_FLAGS)
 _RE_MOTIVO = re.compile(r"^motivo.*?:\s*(.{3,200})$", _RE_FLAGS)
-# Si algún día lo querés volver a pedir, ya queda el regex
-_RE_FECHA_EVAL = re.compile(r"^fecha.*evaluaci[oó]n.*?:\s*(\d{1,2}/\d{1,2}/\d{4})$", _RE_FLAGS)
 
 # Fallbacks (libre)
 _GREETING_RE = re.compile(r"^\s*(hola|buenas|hey|hi|qué\s*tal|buen\s*d[ií]a|buenas\s*tardes|buenas\s*noches)\b", re.IGNORECASE)
@@ -145,28 +143,23 @@ _MOTIVO_FREE_RE = re.compile(r"(?:motivo|cirug[ií]a|procedimiento)\s*:?\s*[- ]*
 def _smart_name_capitalize(s: str) -> str:
     """
     Nombre propio con capitalización correcta: 'perez hernan' -> 'Perez Hernan';
-    preserva guiones y apóstrofes; minúsculas para partículas (de, del, la, los, y, da, das, di, van, von) salvo si es la primera palabra.
+    preserva guiones y apóstrofes; minúsculas para partículas (de, del, la, los, y, da, das, di, van, von)
+    salvo si es la primera palabra.
     """
     if not s:
         return s
     particles = {"de", "del", "la", "las", "los", "y", "da", "das", "di", "van", "von"}
     tokens = [t for t in re.split(r"\s+", s.strip()) if t]
-    out: list[str] = []
 
-    def cap(word: str) -> str:
-        # maneja guiones y apóstrofes
+    def cap_token(tok: str) -> str:
         def cap_simple(w: str) -> str:
             return w[:1].upper() + w[1:].lower() if w else w
-        w = "'".join(cap_simple(p) for p in word.split("'"))
-        parts = w.split("-")
-        return "-".join(cap_simple(p) for p in parts)
+        w = "'".join(cap_simple(p) for p in tok.split("'"))
+        return "-".join(cap_simple(p) for p in w.split("-"))
 
+    out = []
     for i, t in enumerate(tokens):
-        low = t.lower()
-        if i > 0 and low in particles:
-            out.append(low)
-        else:
-            out.append(cap(t))
+        out.append(t.lower() if (i > 0 and t.lower() in particles) else cap_token(t))
     return " ".join(out)
 
 
@@ -214,17 +207,18 @@ def _calc_imc(peso_kg: Optional[float], talla_cm: Optional[int]) -> Optional[flo
 
 
 def normalize_motivo_clinico(context_text: str, raw: Optional[str]) -> Optional[str]:
-    """Heurística mínima (dejamos el LLM para rutas)."""
+    """Heurística mínima local. El LLM puede sobreescribir luego."""
     if not raw:
         return None
     s = raw.lower().strip()
-    reps = [
+    replacements = [
         (r"apend", "apendicectomía"),
         (r"ves[ií]cul|colecist", "colecistectomía"),
         (r"hernia inguinal", "hernioplastia inguinal"),
         (r"catarat", "facoemulsificación de catarata"),
+        (r"(cirug[ií]a|plástic|estétic)a\s+de\s+nariz|rinoplast", "rinoplastia"),
     ]
-    for k, v in reps:
+    for k, v in replacements:
         if re.search(k, s):
             return v
     return raw.strip().capitalize()
@@ -247,7 +241,6 @@ def _parse_generales(text: str) -> Dict[str, Any]:
     os_ = (_RE_OS.search(text) or [None, None])[1]
     afiliado = (_RE_AFIL.search(text) or [None, None])[1]
     motivo = (_RE_MOTIVO.search(text) or [None, None])[1]
-    feval = (_RE_FECHA_EVAL.search(text) or [None, None])[1]
 
     # 2) Fallback libre (si faltan campos)
     if not nombre:
@@ -268,7 +261,6 @@ def _parse_generales(text: str) -> Dict[str, Any]:
         if m:
             peso_s = m.group("peso")
     if not talla_s:
-        # captura libre (cm o m)
         m = _HEIGHT_FREE_CM_RE.search(text)
         if m:
             talla_s = m.group("talla")
@@ -301,6 +293,7 @@ def _parse_generales(text: str) -> Dict[str, Any]:
             cleaned = cleaned.lstrip("0") or "0"
             if 6 <= len(cleaned) <= 10:
                 out_dni = cleaned
+
     fnac_std = _parse_date_ddmmyyyy(fnac) if fnac else None
 
     peso: Optional[float] = None
@@ -314,19 +307,14 @@ def _parse_generales(text: str) -> Dict[str, Any]:
 
     talla: Optional[int] = None
     if talla_s:
-        ss = talla_s.strip().replace(",", ".")
         try:
-            if "." in ss:
-                # asume metros si 0.9–2.5
-                val = float(ss)
-                if 0.9 <= val <= 2.5:
-                    t = int(round(val * 100))
-                else:
-                    t = int(round(val))  # fallback raro
+            ss = talla_s.strip().replace(",", ".")
+            val = float(ss)
+            # si parece metros (0.9–2.5), convertimos a cm; si no, tratamos como cm
+            if 0.9 <= val <= 2.5:
+                t = int(round(val * 100))
             else:
-                t = int(ss)
-                if t <= 3:  # 1–3 -> metros
-                    t = int(round(float(ss) * 100))
+                t = int(round(val))
             if 100 <= t <= 230:
                 talla = t
         except Exception:
@@ -340,10 +328,9 @@ def _parse_generales(text: str) -> Dict[str, Any]:
     else:
         motivo_val = None
 
-    feval_std = _parse_date_ddmmyyyy(feval) if feval else None
-    if not feval_std:
-        today = date.today()
-        feval_std = f"{today.day:02d}/{today.month:02d}/{today.year:04d}"
+    # fecha de evaluación: registrar (por defecto hoy) pero no mostrar
+    today = date.today()
+    feval_std = f"{today.day:02d}/{today.month:02d}/{today.year:04d}"
 
     edad = _calc_edad(fnac_std)
     imc = _calc_imc(peso, talla)
@@ -362,8 +349,7 @@ def _parse_generales(text: str) -> Dict[str, Any]:
     if edad is not None:
         datos["edad"] = edad
     if feval_std:
-        # registrar pero no mostrar en la confirmación (lo ocultamos allí)
-        datos["fecha_evaluacion"] = feval_std
+        datos["fecha_evaluacion"] = feval_std  # se oculta en confirmación
     if datos:
         ficha["datos"] = datos
 
@@ -377,7 +363,7 @@ def _parse_generales(text: str) -> Dict[str, Any]:
     if antropo:
         ficha["antropometria"] = antropo
 
-    # Normalizar motivo clínico (heurística mínima aquí; LLM en rutas puede sobreescribir)
+    # Normalizar motivo clínico (heurística local)
     motivo_norm = normalize_motivo_clinico(text, motivo_val) if motivo_val else None
 
     cobertura: Dict[str, Any] = {}
@@ -477,8 +463,89 @@ def fill_from_text_modular(state: Any, module_idx: int, text: str) -> Dict[str, 
     return data
 
 def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
-    """Stub: el LLM se usa desde rutas para normalizar 'motivo_cirugia' si está disponible."""
-    return {}
+    """
+    Parser LLM. Para el Módulo 0, si está configurado OPENAI_API_KEY en entorno,
+    intenta normalizar el motivo de cirugía y devuelve un patch mínimo que lo pisa.
+    Para otros módulos, no hace nada.
+    """
+    if module_idx != 0:
+        return {}
+    import os, re  # locales por seguridad
+
+    # 1) Intentar extraer un candidato de motivo para dar contexto
+    candidate = None
+    m = re.search(r"(?im)^motivo.*?:\s*(.+)$", text or "")
+    if m:
+        candidate = (m.group(1) or "").strip()
+    if not candidate:
+        m2 = re.search(
+            r"(oper(ar|aci[oó]n)|sac(ar|an)|extirpar|quitar|me\s+hacen|intervenci[oó]n)[:\s,-]*([^\n]+)",
+            text or "",
+            re.IGNORECASE,
+        )
+        if m2:
+            candidate = (m2.group(3) or "").strip()[:120]
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key or not candidate:
+        return {}
+
+    prompt = (
+        "Eres un asistente clínico. Lee el texto y devuelve SOLO un término quirúrgico "
+        "estandarizado en español (con tildes), sin explicaciones ni signos extra. "
+        "Si no puedes inferirlo, responde NULL.\n\n"
+        f"Texto completo:\n{text}\n\n"
+        f"Motivo libre detectado: {candidate}\n\n"
+        "Ejemplos:\n"
+        "- 'me sacan la vesicula' -> colecistectomía\n"
+        "- 'me operan de cataratas' -> facoemulsificación de catarata\n"
+        "- 'me sacan un tumor de la mama' -> tumorectomía\n"
+        "- 'me quitan la mama izquierda' -> mastectomía\n"
+        "- 'hernia en la ingle' -> hernioplastia inguinal\n"
+        "- 'cirugía plástica de nariz' -> rinoplastia\n"
+    )
+
+    term = None
+    try:
+        # SDK nuevo
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        rsp = client.chat.completions.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            messages=[
+                {"role": "system", "content": "Responde solo con el término clínico."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+            max_tokens=16,
+        )
+        term = (rsp.choices[0].message.content or "").strip()
+    except Exception:
+        try:
+            # SDK viejo
+            import openai  # type: ignore
+            openai.api_key = api_key
+            rsp = openai.ChatCompletion.create(
+                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                messages=[
+                    {"role": "system", "content": "Responde solo con el término clínico."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0,
+                max_tokens=16,
+            )
+            term = (rsp["choices"][0]["message"]["content"] or "").strip()
+        except Exception:
+            term = None
+
+    if not term or term.upper() == "NULL":
+        return {}
+
+    term = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s\-]", "", term).strip()
+    if not term:
+        return {}
+
+    return {"ficha": {"cobertura": {"motivo_cirugia": term}}}
 
 def _fmt(v: Any) -> str:
     return "-" if v in (None, "", []) else str(v)
@@ -486,7 +553,7 @@ def _fmt(v: Any) -> str:
 def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> str:
     """
     Resume lo capturado para confirmación. Evita mostrar flags internos.
-    Si detecta solo _start en el módulo 0, devuelve un saludo básico (rutas lo sobreescriben).
+    Si detecta solo _start en el módulo 0, devuelve un saludo genérico (routes.py manda el saludo real).
     """
     ficha = patch.get("ficha", patch) or {}
     if not isinstance(ficha, dict):
@@ -495,6 +562,7 @@ def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> 
     if module_idx == 0 and "_start" in ficha and len(ficha) == 1:
         return "¡Hola! Empecemos."
 
+    # Módulo 0: confirmación con derivados (sin mostrar fecha_evaluacion)
     if module_idx == 0:
         dni = ficha.get("dni")
         datos = ficha.get("datos", {}) if isinstance(ficha.get("datos"), dict) else {}
@@ -503,7 +571,6 @@ def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> 
         nombre = datos.get("nombre_completo")
         fnac = datos.get("fecha_nacimiento")
         edad = datos.get("edad")
-        # NOTA: ocultamos fecha_evaluacion en la confirmación
         peso = antropo.get("peso_kg")
         talla = antropo.get("talla_cm")
         imc = antropo.get("imc")
@@ -520,6 +587,7 @@ def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> 
         ]
         return "\n".join(lineas)
 
+    # Otros módulos: genérico
     public_items = [(k, v) for k, v in ficha.items() if not str(k).startswith("_")]
     if not public_items:
         return "No pude extraer datos de este bloque."
