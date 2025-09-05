@@ -22,11 +22,8 @@ MODULES = [
             "Motivo de consulta (breve):"
         ),
     },
-    {
-        "name": "Alergias y medicación",
-        "use_llm": False,
-        "prompt": "¿Tenés alergias? ¿Tomás medicación habitual? Indicá nombres/dosis si podés.",
-    },
+    {"name": "Alergias y medicación", "use_llm": False,
+     "prompt": "¿Tenés alergias? ¿Tomás medicación habitual? Indicá nombres/dosis si podés."},
     {"name": "Antecedentes", "use_llm": False,
      "prompt": "Contame antecedentes relevantes (cardíacos, respiratorios, HTA, DM, cirugías previas, etc.)."},
     {"name": "Estudios complementarios", "use_llm": False,
@@ -38,9 +35,8 @@ MODULES = [
 ]
 
 # ============================================================================
-# Helpers
+# Helpers de estado
 # ============================================================================
-
 def _ensure_ficha(state: Any) -> None:
     if not hasattr(state, "ficha") or state.ficha is None:
         try:
@@ -49,22 +45,52 @@ def _ensure_ficha(state: Any) -> None:
         except Exception:
             state.ficha = {}
 
+def _to_dict(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {k: _to_dict(v) for k, v in obj.items()}
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    if hasattr(obj, "dict"):
+        return obj.dict()
+    if hasattr(obj, "__dict__"):
+        return {k: _to_dict(v) for k, v in vars(obj).items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_dict(x) for x in obj]
+    return obj
+
+def _deep_merge_dict(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(a or {})
+    for k, v in (b or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge_dict(out[k], v)
+        else:
+            out[k] = v
+    return out
+
 def merge_state(state: Any, patch: Dict[str, Any]) -> Any:
+    """
+    Deep-merge del patch en state.ficha (funciona para dict o Pydantic).
+    Evita que se pierdan datos previos de sub-secciones como 'datos', 'antropometria', etc.
+    """
     _ensure_ficha(state)
-    data = patch.get("ficha", patch)
-    if not isinstance(data, dict):
+    inc = patch.get("ficha", patch)
+    if not isinstance(inc, dict):
         return state
+
+    current = _to_dict(state.ficha)
+    merged = _deep_merge_dict(current, inc)
+
     if isinstance(state.ficha, dict):
-        for k, v in data.items():
-            if isinstance(k, str) and k.startswith("_"):
-                continue
-            state.ficha[k] = v
+        state.ficha.clear()
+        state.ficha.update(merged)
         return state
-    for k, v in data.items():
-        if isinstance(k, str) and k.startswith("_"):
-            continue
-        if hasattr(state.ficha, k):
+
+    # Pydantic u objeto: settear campo a campo (Pydantic vuelve a parsear)
+    for k, v in merged.items():
+        try:
             setattr(state.ficha, k, v)
+        except Exception:
+            pass
     return state
 
 def prompt_for_module(idx: int) -> str:
@@ -110,7 +136,7 @@ _OS_FREE_RE = re.compile(r"(?:obra\s+social|prepaga|cobertura)\s*:?\s*[- ]*(?P<o
 _AFIL_FREE_RE = re.compile(r"(?:nro?\.?\s*afiliad[oa]|afiliad[oa])\s*:?\s*[- ]*(?P<afil>[A-Za-z0-9\-\.\/]{3,})", re.IGNORECASE)
 _MOTIVO_FREE_RE = re.compile(r"(?:motivo|cirug[ií]a|procedimiento)\s*:?\s*[- ]*(?P<motivo>[\wÀ-ÿ0-9,\. '\-]{3,})", re.IGNORECASE)
 
-# ---------------- normalizadores/calculadores ----------------
+# ---------------- normalizadores ----------------
 def _smart_name_capitalize(s: str) -> str:
     """'perez hernan' -> 'Perez Hernan'; maneja partículas, guiones y apóstrofes."""
     if not s:
@@ -129,15 +155,12 @@ def _smart_name_capitalize(s: str) -> str:
         out.append(t.lower() if (i > 0 and t.lower() in particles) else cap_token(t))
     return " ".join(out)
 
-def _norm_year(y: int) -> int:
-    if y < 100:
-        return (2000 if y <= 21 else 1900) + y
-    return y
-
 def _parse_date_ddmmyyyy(s: str) -> Optional[str]:
     try:
         d, m, y = s.split("/")
-        from datetime import date
+        y = int(y)
+        if y < 1900:
+            return None
         dt = date(int(y), int(m), int(d))
         if dt > date.today():
             return None
@@ -169,7 +192,7 @@ def _calc_imc(peso_kg: Optional[float], talla_cm: Optional[int]) -> Optional[flo
         return None
 
 def normalize_motivo_clinico(context_text: str, raw: Optional[str]) -> Optional[str]:
-    """Heurística local, LLM puede sobreescribir luego."""
+    """Heurística local; el LLM puede sobreescribir luego."""
     if not raw:
         return None
     s = raw.lower().strip()
@@ -213,7 +236,9 @@ def _parse_generales(text: str) -> Dict[str, Any]:
     if not fnac:
         m = _DOB_FREE_RE.search(text)
         if m:
-            d = int(m.group("d")); mth = int(m.group("m")); y = _norm_year(int(m.group("y")))
+            d = int(m.group("d")); mth = int(m.group("m")); y = int(m.group("y"))
+            if y < 100:
+                y = 2000 + y if y <= 21 else 1900 + y
             fnac = f"{d:02d}/{mth:02d}/{y:04d}"
     if not peso_s:
         m = _WEIGHT_FREE_RE.search(text)
@@ -383,81 +408,8 @@ def fill_from_text_modular(state: Any, module_idx: int, text: str) -> Dict[str, 
 
 # --- LLM (opcional) para normalizar motivo del Módulo 0 ---
 def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
-    """
-    Si tenés OPENAI_API_KEY, intenta normalizar 'motivo_cirugia' con LLM y devuelve
-    un patch mínimo que pisa la heurística local. Para otros módulos, no hace nada.
-    """
-    if module_idx != 0:
-        return {}
-    import os
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return {}
-
-    # Extraer candidato para dar contexto
-    candidate = None
-    m = re.search(r"(?im)^motivo.*?:\s*(.+)$", text or "")
-    if m:
-        candidate = (m.group(1) or "").strip()
-    if not candidate:
-        m2 = re.search(
-            r"(oper(ar|aci[oó]n)|sac(ar|an)|extirpar|quitar|me\s+hacen|intervenci[oó]n)[:\s,-]*([^\n]+)",
-            text or "",
-            re.IGNORECASE,
-        )
-        if m2:
-            candidate = (m2.group(3) or "").strip()[:120]
-
-    if not candidate:
-        return {}
-
-    prompt = (
-        "Eres un asistente clínico. Lee el texto y devuelve SOLO un término quirúrgico "
-        "estandarizado en español (con tildes), sin explicaciones ni signos extra. "
-        "Si no puedes inferirlo, responde NULL.\n\n"
-        f"Texto completo:\n{text}\n\n"
-        f"Motivo libre detectado: {candidate}\n\n"
-        "Ejemplos:\n"
-        "- 'me sacan la vesicula' -> colecistectomía\n"
-        "- 'me operan de cataratas' -> facoemulsificación de catarata\n"
-        "- 'me sacan un tumor de la mama' -> tumorectomía\n"
-        "- 'me quitan la mama izquierda' -> mastectomía\n"
-        "- 'hernia en la ingle' -> hernioplastia inguinal\n"
-        "- 'cirugía plástica de nariz' -> rinoplastia\n"
-    )
-
-    term = None
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-        rsp = client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-            messages=[{"role": "system", "content": "Responde solo con el término clínico."},
-                      {"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=16,
-        )
-        term = (rsp.choices[0].message.content or "").strip()
-    except Exception:
-        try:
-            import openai  # type: ignore
-            openai.api_key = api_key
-            rsp = openai.ChatCompletion.create(
-                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-                messages=[{"role": "system", "content": "Responde solo con el término clínico."},
-                          {"role": "user", "content": prompt}],
-                temperature=0,
-                max_tokens=16,
-            )
-            term = (rsp["choices"][0]["message"]["content"] or "").strip()
-        except Exception:
-            term = None
-
-    if not term or term.upper() == "NULL":
-        return {}
-
-    term = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s\-]", "", term).strip()
-    return {"ficha": {"cobertura": {"motivo_cirugia": term}}} if term else {}
+    # Dejar vacío si no usás LLM ahora
+    return {}
 
 # --- Confirmación ---
 def _fmt(v: Any) -> str:
@@ -466,7 +418,7 @@ def _fmt(v: Any) -> str:
 def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> str:
     ficha = patch.get("ficha", patch) or {}
     if not isinstance(ficha, dict):
-        return "No pude extraer datos de este bloque."
+        return "✔️ Registré los datos."
 
     if module_idx == 0 and "_start" in ficha and len(ficha) == 1:
         return "¡Hola! Empecemos."
@@ -497,7 +449,7 @@ def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> 
 
     public_items = [(k, v) for k, v in ficha.items() if not str(k).startswith("_")]
     if not public_items:
-        return "No pude extraer datos de este bloque."
+        return "✔️ Registré los datos."
     modulo_name = MODULES[module_idx]["name"] if 0 <= module_idx < len(MODULES) else "Bloque"
     joined = "; ".join(f"{k}: {v}" for k, v in public_items)
     return f"Anoté en {modulo_name}: {joined}."

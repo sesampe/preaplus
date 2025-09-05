@@ -15,7 +15,6 @@ from core.steps import (
     merge_state,
     summarize_patch_for_confirmation,
     MODULES,
-    prompt_for_module,
 )
 
 router = APIRouter()
@@ -83,7 +82,7 @@ def _extract_incoming(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
         return "__IGNORE__", mid
     return text, mid
 
-# ---- getters tolerantes a dict / pydantic ----
+# ---- getters / dictify tolerantes a Pydantic ----
 def _dig(obj: Any, path: list[str]) -> Any:
     cur = obj
     for k in path:
@@ -94,6 +93,22 @@ def _dig(obj: Any, path: list[str]) -> Any:
         else:
             cur = getattr(cur, k, None)
     return cur
+
+def _to_dict(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {k: _to_dict(v) for k, v in obj.items()}
+    # pydantic v2
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    # pydantic v1
+    if hasattr(obj, "dict"):
+        return obj.dict()
+    # objetos simples
+    if hasattr(obj, "__dict__"):
+        return {k: _to_dict(v) for k, v in vars(obj).items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_dict(x) for x in obj]
+    return obj
 
 def _has(v):
     return v not in (None, "", [], {})
@@ -118,17 +133,17 @@ def _missing_mod0_required(state) -> list[str]:
 def _missing_form_snippet(missing: list[str]) -> str:
     """
     Devuelve solo las líneas del formulario correspondientes a los campos faltantes.
-    Formato listo para copiar/pegar por WhatsApp.
+    En **negrita** (WhatsApp: *texto*).
     """
     mapping = {
-        "Nombre y apellido": "Nombre y apellido:",
-        "DNI (solo números)": "DNI (solo números):",
-        "Fecha nacimiento (dd/mm/aaaa)": "Fecha nacimiento (dd/mm/aaaa):",
-        "Peso kg": "Peso kg (ej 72.5):",
-        "Talla cm": "Talla cm (ej 170):",
-        "Obra social": "Obra social:",
-        "N° afiliado": "N° afiliado:",
-        "Motivo de consulta": "Motivo de consulta (breve):",
+        "Nombre y apellido": "*Nombre y apellido:*",
+        "DNI (solo números)": "*DNI (solo números):*",
+        "Fecha nacimiento (dd/mm/aaaa)": "*Fecha nacimiento (dd/mm/aaaa):*",
+        "Peso kg": "*Peso kg (ej 72.5):*",
+        "Talla cm": "*Talla cm (ej 170):*",
+        "Obra social": "*Obra social:*",
+        "N° afiliado": "*N° afiliado:*",
+        "Motivo de consulta": "*Motivo de consulta (breve):*",
     }
     lines = [mapping[m] for m in missing if m in mapping]
     return "\n".join(lines)
@@ -149,28 +164,21 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[Optional[list[st
         if patch_llm:
             state = merge_state(state, {"ficha": patch_llm.get("ficha", patch_llm)})
 
-    # 3) Confirmación combinada
-    combined = {"ficha": {}}
-    if patch_local:
-        combined["ficha"].update(patch_local.get("ficha", patch_local))
-    if patch_llm:
-        combined["ficha"].update(patch_llm.get("ficha", patch_llm))
-
-    had_any = bool(combined["ficha"])
-    confirm = summarize_patch_for_confirmation(combined, module_idx) if had_any else "No pude extraer datos de este bloque."
+    # 3) Confirmación basada en TODO el estado acumulado
+    state_snapshot = {"ficha": _to_dict(getattr(state, "ficha", {}))}
+    confirm = summarize_patch_for_confirmation(state_snapshot, module_idx)
 
     # 4) Lógica de avance
     start_only = (
         module_idx == 0
-        and isinstance(combined.get("ficha"), dict)
-        and set(combined["ficha"].keys()) == {"_start"}
+        and isinstance(patch_local.get("ficha", patch_local), dict)
+        and set(patch_local.get("ficha", patch_local).keys()) == {"_start"}
     )
-    advance_now = had_any and not start_only
+    advance_now = not start_only
 
     messages: list[str] = []
 
-    # En módulo 0: no avanzar si faltan obligatorios (p.ej., fecha inválida).
-    # En ese caso, mandamos SOLO el snippet de campos faltantes.
+    # En módulo 0: no avanzar si faltan obligatorios. Mandar SOLO snippet bold.
     if module_idx == 0 and not start_only:
         faltan = _missing_mod0_required(state)
         if faltan:
