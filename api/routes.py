@@ -102,6 +102,7 @@ def _missing_mod0_required(state) -> list[str]:
     """
     Valida que estén los obligatorios del módulo 0 en el estado ACTUAL.
     Si la fecha es inválida, 'datos.fecha_nacimiento' no existirá y se pedirá.
+    Retorna *nombres lógicos* de campos.
     """
     missing = []
     if not _has(_dig(state, ["ficha", "dni"])): missing.append("DNI (solo números)")
@@ -113,6 +114,24 @@ def _missing_mod0_required(state) -> list[str]:
     if not _has(_dig(state, ["ficha", "cobertura", "afiliado"])): missing.append("N° afiliado")
     if not _has(_dig(state, ["ficha", "cobertura", "motivo_cirugia"])): missing.append("Motivo de consulta")
     return missing
+
+def _missing_form_snippet(missing: list[str]) -> str:
+    """
+    Devuelve solo las líneas del formulario correspondientes a los campos faltantes.
+    Formato listo para copiar/pegar por WhatsApp.
+    """
+    mapping = {
+        "Nombre y apellido": "Nombre y apellido:",
+        "DNI (solo números)": "DNI (solo números):",
+        "Fecha nacimiento (dd/mm/aaaa)": "Fecha nacimiento (dd/mm/aaaa):",
+        "Peso kg": "Peso kg (ej 72.5):",
+        "Talla cm": "Talla cm (ej 170):",
+        "Obra social": "Obra social:",
+        "N° afiliado": "N° afiliado:",
+        "Motivo de consulta": "Motivo de consulta (breve):",
+    }
+    lines = [mapping[m] for m in missing if m in mapping]
+    return "\n".join(lines)
 
 # ====== Core TRIAGE ======
 def _triage_block(state: ConversationState, text: str) -> Tuple[Optional[list[str]], ConversationState]:
@@ -148,12 +167,17 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[Optional[list[st
     )
     advance_now = had_any and not start_only
 
-    # En módulo 0: no avanzar si faltan obligatorios (p.ej., fecha inválida)
+    messages: list[str] = []
+
+    # En módulo 0: no avanzar si faltan obligatorios (p.ej., fecha inválida).
+    # En ese caso, mandamos SOLO el snippet de campos faltantes.
     if module_idx == 0 and not start_only:
         faltan = _missing_mod0_required(state)
         if faltan:
             advance_now = False
-            confirm += "\n\n⚠ Me faltó: " + ", ".join(faltan) + "."
+            messages.append(confirm)
+            messages.append(_missing_form_snippet(faltan))
+            return messages, state
 
     if advance_now:
         state.module_idx = min(state.module_idx + 1, len(MODULES) - 1)
@@ -162,8 +186,6 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[Optional[list[st
         state._last_failed_module = None if start_only else module_idx
 
     # 5) Mensajes a enviar
-    messages: list[str] = []
-
     if start_only:
         # Saludo + formulario en mensajes separados
         saludo = (
