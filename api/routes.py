@@ -147,7 +147,8 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[list[str], Conve
     if patch_local:
         state = merge_state(state, {"ficha": patch_local.get("ficha", patch_local)})
 
-    # 2) Patch LLM (si el módulo lo usa) — normaliza motivo quirúrgico
+    # 2) Patch LLM (si el módulo lo usa) — ahora también EXTRAEMOS datos libres del módulo 0,
+    #    además de normalizar el motivo.
     patch_llm: Dict[str, Any] = {}
     if 0 <= module_idx < len(MODULES) and MODULES[module_idx].get("use_llm"):
         patch_llm = llm_parse_modular(text or "", module_idx) or {}

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple
 import re
 import os
+import json
 from datetime import date
 
 # ============================================================================
@@ -11,7 +12,7 @@ from datetime import date
 MODULES = [
     {
         "name": "Datos generales",
-        "use_llm": True,  # usar LLM para normalizar 'motivo_cirugia'
+        "use_llm": True,  # usar LLM para extraer libres y normalizar (incluye motivo_cirugia)
         "prompt": (
             "Nombre y apellido:\n"
             "DNI (solo números):\n"
@@ -238,7 +239,7 @@ def normalize_motivo_clinico_heuristic(raw: Optional[str]) -> Optional[str]:
             return term
     return raw.strip().capitalize()
 
-# ---------------- Módulo 0: DATOS GENERALES ----------------
+# ---------------- Módulo 0: DATOS GENERALES (regex+heurística) ----------------
 def _parse_generales(text: str) -> Dict[str, Any]:
     text = text or ""
 
@@ -437,7 +438,7 @@ def fill_from_text_modular(state: Any, module_idx: int, text: str) -> Dict[str, 
     return data or {}
 
 # ============================================================================
-# LLM: normalización SNOMED CT del motivo quirúrgico (Módulo 0)
+# LLM extractores
 # ============================================================================
 def _call_openai(messages: list[dict], max_tokens: int = 128) -> Optional[str]:
     """Intenta llamar OpenAI por SDK v1 o v0; devuelve el texto o None."""
@@ -471,12 +472,143 @@ def _call_openai(messages: list[dict], max_tokens: int = 128) -> Optional[str]:
         except Exception:
             return None
 
+def _llm_extract_generales_full(text: str) -> Dict[str, Any]:
+    """
+    Extractor LLM para respuestas libres del Módulo 0.
+    Devuelve un patch 'ficha' con datos normalizados si el JSON es válido.
+    """
+    if not (text or "").strip():
+        return {}
+
+    # Prompt del extractor
+    system = (
+        "Sos un extractor de datos para admisión preanestésica en Argentina. "
+        "Debés leer un mensaje libre de WhatsApp y devolver SOLO un JSON válido con este esquema:"
+        '{"nombre_apellido":{"value":null,"source_span":null,"confidence":0.0},"dni":{"value":null,"source_span":null,"confidence":0.0},"fecha_nacimiento":{"value":null,"source_span":null,"confidence":0.0},"peso_kg":{"value":null,"source_span":null,"confidence":0.0},"talla_cm":{"value":null,"source_span":null,"confidence":0.0},"obra_social":{"value":null,"source_span":null,"confidence":0.0},"nro_afiliado":{"value":null,"source_span":null,"confidence":0.0},"motivo_consulta":{"value":null,"source_span":null,"confidence":0.0},"imc":{"value":null},"missing_fields":[],"questions_to_user":[]} '
+        "Reglas: DNI solo dígitos; fecha en dd/mm/aaaa; talla en cm; calcular IMC si hay peso y talla. "
+        "Si un dato es imposible, dejalo en null."
+    )
+    user = f"Mensaje del paciente:\n{text}"
+
+    # Usamos el cliente HTTP local si está configurado; si no, caemos al SDK directo
+    try:
+        from core.llm_client import llm_client  # type: ignore
+        raw = llm_client.call_llm_simple(
+            prompt=system + "\n\n" + user, max_tokens=350, temperature=0
+        )
+    except Exception:
+        raw = _call_openai(
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": user}], max_tokens=350
+        )
+    if not raw:
+        return {}
+
+    obj = None
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        return {}
+
+    # Sanitización y armado del patch
+    def _getv(key: str):
+        it = obj.get(key) or {}
+        return (it.get("value") if isinstance(it, dict) else None)
+
+    nombre = (_getv("nombre_apellido") or "").strip()
+    dni_raw = (_getv("dni") or "").strip()
+    fnac = (_getv("fecha_nacimiento") or "").strip()
+    peso = _getv("peso_kg")
+    talla = _getv("talla_cm")
+    os_ = (_getv("obra_social") or "").strip()
+    afiliado = (_getv("nro_afiliado") or "").strip()
+    motivo = (_getv("motivo_consulta") or "").strip()
+    imc_val = obj.get("imc", {}).get("value") if isinstance(obj.get("imc"), dict) else obj.get("imc")
+
+    # Normalizaciones/rangos mínimos
+    dni = re.sub(r"\D+", "", dni_raw) if dni_raw else None
+    if dni and not (6 <= len(dni) <= 10):
+        dni = None
+
+    fnac_std = _parse_date_ddmmyyyy(fnac) if fnac else None
+
+    try:
+        peso_f = float(str(peso).replace(",", ".")) if peso is not None else None
+        if peso_f is not None and not (20 <= peso_f <= 300):
+            peso_f = None
+    except Exception:
+        peso_f = None
+
+    try:
+        # talla puede venir en metros (1.68) o en cm (168)
+        if talla is None:
+            talla_cm = None
+        else:
+            tv = float(str(talla).replace(",", "."))
+            if 0.9 <= tv <= 2.5:
+                talla_cm = int(round(tv * 100))
+            else:
+                talla_cm = int(round(tv))
+            if not (100 <= talla_cm <= 230):
+                talla_cm = None
+    except Exception:
+        talla_cm = None
+
+    if imc_val is None:
+        imc_val = _calc_imc(peso_f, talla_cm)
+
+    # Motivo: aplicar heurística local para uniformar términos simples
+    motivo_norm = normalize_motivo_clinico_heuristic(motivo) if motivo else None
+
+    today = date.today()
+    feval_std = f"{today.day:02d}/{today.month:02d}/{today.year:04d}"
+    edad = _calc_edad(fnac_std)
+
+    ficha: Dict[str, Any] = {}
+    if dni: ficha["dni"] = dni
+
+    datos: Dict[str, Any] = {}
+    if nombre: datos["nombre_completo"] = _smart_name_capitalize(nombre)
+    if fnac_std: datos["fecha_nacimiento"] = fnac_std
+    if edad is not None: datos["edad"] = edad
+    datos["fecha_evaluacion"] = feval_std
+    if datos: ficha["datos"] = datos
+
+    antropo: Dict[str, Any] = {}
+    if peso_f is not None: antropo["peso_kg"] = peso_f
+    if talla_cm is not None: antropo["talla_cm"] = talla_cm
+    if imc_val is not None: antropo["imc"] = imc_val
+    if antropo: ficha["antropometria"] = antropo
+
+    cobertura: Dict[str, Any] = {}
+    if os_: cobertura["obra_social"] = os_
+    if afiliado: cobertura["afiliado"] = afiliado
+    if motivo_norm: cobertura["motivo_cirugia"] = motivo_norm
+    if cobertura: ficha["cobertura"] = cobertura
+
+    return {"ficha": ficha} if ficha else {}
+
+# ============================================================================
+# LLM: normalización SNOMED CT del motivo quirúrgico (Módulo 0)
+# ============================================================================
 def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
-    """Solo módulo 0: intenta mapear el motivo a término/procedimiento SNOMED CT."""
+    """
+    Módulo 0:
+      - Intenta primero extracción completa de datos generales desde texto libre.
+      - Además, intenta mapear el motivo a término/procedimiento SNOMED CT (si hay candidato).
+    Otros módulos: no hace nada.
+    """
     if module_idx != 0:
         return {}
 
-    # Detectar candidato rápidamente (si no vino con etiqueta)
+    patch_total: Dict[str, Any] = {}
+
+    # 1) Extracción completa libre
+    patch_free = _llm_extract_generales_full(text or "")
+    if patch_free:
+        patch_total = _deep_merge_dict(patch_total, patch_free)
+
+    # 2) Normalización de motivo a SNOMED (si hay texto candidato)
     m = re.search(r"(?im)^motivo.*?:\s*(.+)$", text or "")
     candidate = (m.group(1).strip() if m else None) or ""
     if not candidate:
@@ -486,68 +618,60 @@ def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
         if m2:
             candidate = (m2.group(4) or "").strip()
 
-    if not candidate:
-        return {}
+    if candidate:
+        system = (
+            "Eres un codificador clínico experto en procedimientos quirúrgicos. "
+            "Tu tarea es estandarizar descripciones libres en español a un término de procedimiento "
+            "según SNOMED CT (o el término clínico más equivalente si no hay correspondencia exacta). "
+            "Responde SOLO en JSON válido con estas claves: "
+            "{\"term_es\": string, \"sctid\": string|null, \"fsn_en\": string|null, \"confidence\": number}. "
+            "No incluyas texto adicional."
+        )
 
-    system = (
-        "Eres un codificador clínico experto en procedimientos quirúrgicos. "
-        "Tu tarea es estandarizar descripciones libres en español a un término de procedimiento "
-        "según SNOMED CT (o el término clínico más equivalente si no hay correspondencia exacta). "
-        "Responde SOLO en JSON válido con estas claves: "
-        "{\"term_es\": string, \"sctid\": string|null, \"fsn_en\": string|null, \"confidence\": number}. "
-        "No incluyas texto adicional."
-    )
+        user = (
+            "Texto del paciente (español):\n"
+            f"{text}\n\n"
+            "Extrae y normaliza el procedimiento principal. Si dice 'hernia en ombligo', deberías devolver "
+            "'hernioplastia umbilical'. Si dice 'me sacan la vesícula', 'colecistectomía'. "
+            "Si no puedes decidir, devuelve sctid=null y confidence baja.\n\n"
+            "Ejemplos de salida JSON:\n"
+            "{\"term_es\":\"apendicectomía\",\"sctid\":\"80146002\",\"fsn_en\":\"Appendectomy (procedure)\",\"confidence\":0.95}\n"
+            "{\"term_es\":\"facoemulsificación de catarata\",\"sctid\":\"428341000124107\",\"fsn_en\":\"Phacoemulsification of cataract (procedure)\",\"confidence\":0.92}\n"
+            "{\"term_es\":\"hernioplastia umbilical\",\"sctid\":\"399125006\",\"fsn_en\":\"Repair of umbilical hernia (procedure)\",\"confidence\":0.9}\n\n"
+            f"Motivo libre detectado: {candidate}"
+        )
 
-    user = (
-        "Texto del paciente (español):\n"
-        f"{text}\n\n"
-        "Extrae y normaliza el procedimiento principal. Si dice 'hernia en ombligo', deberías devolver "
-        "'hernioplastia umbilical'. Si dice 'me sacan la vesícula', 'colecistectomía'. "
-        "Si no puedes decidir, devuelve sctid=null y confidence baja.\n\n"
-        "Ejemplos de salida JSON:\n"
-        "{\"term_es\":\"apendicectomía\",\"sctid\":\"80146002\",\"fsn_en\":\"Appendectomy (procedure)\",\"confidence\":0.95}\n"
-        "{\"term_es\":\"facoemulsificación de catarata\",\"sctid\":\"428341000124107\",\"fsn_en\":\"Phacoemulsification of cataract (procedure)\",\"confidence\":0.92}\n"
-        "{\"term_es\":\"hernioplastia umbilical\",\"sctid\":\"399125006\",\"fsn_en\":\"Repair of umbilical hernia (procedure)\",\"confidence\":0.9}\n\n"
-        f"Motivo libre detectado: {candidate}"
-    )
+        raw = _call_openai(
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": user}],
+            max_tokens=200,
+        )
+        if raw:
+            term_es = None
+            sctid = None
+            fsn = None
+            conf = 0.0
+            try:
+                obj = json.loads(raw)
+                term_es = (obj.get("term_es") or "").strip() or None
+                sctid = (obj.get("sctid") or None)
+                fsn = (obj.get("fsn_en") or None)
+                conf = float(obj.get("confidence") or 0)
+            except Exception:
+                term_es = raw.strip() if raw else None
 
-    raw = _call_openai(
-        messages=[{"role": "system", "content": system},
-                  {"role": "user", "content": user}],
-        max_tokens=200,
-    )
-    if not raw:
-        return {}
+            if term_es:
+                term_es = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s\-]", "", term_es).strip()
+                patch_sn = {}
+                if conf >= 0.7 or sctid:
+                    patch_sn = {"ficha": {"cobertura": {"motivo_cirugia": term_es}}}
+                if sctid or fsn:
+                    patch_sn.setdefault("ficha", {}).setdefault("cobertura", {})["motivo_snomed"] = {
+                        "sctid": sctid, "fsn_en": fsn, "confidence": conf
+                    }
+                patch_total = _deep_merge_dict(patch_total, patch_sn)
 
-    # Intentar decodificar JSON simple
-    import json
-    term_es = None
-    sctid = None
-    fsn = None
-    conf = 0.0
-    try:
-        obj = json.loads(raw)
-        term_es = (obj.get("term_es") or "").strip() or None
-        sctid = (obj.get("sctid") or None)
-        fsn = (obj.get("fsn_en") or None)
-        conf = float(obj.get("confidence") or 0)
-    except Exception:
-        # fallback: quizá devolvió solo texto; lo usamos como término
-        term_es = raw.strip()
-
-    if not term_es:
-        return {}
-
-    # Sanitizar término
-    term_es = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s\-]", "", term_es).strip()
-    # Preferir término LLM si conf >= 0.7; si no, dejamos que la heurística local siga vigente
-    patch: Dict[str, Any] = {"ficha": {"cobertura": {"motivo_cirugia": term_es}}} if conf >= 0.7 or sctid else {}
-    # Adjuntar metadatos SNOMED si llegaron (no se muestran al paciente)
-    if sctid or fsn:
-        patch.setdefault("ficha", {}).setdefault("cobertura", {})["motivo_snomed"] = {
-            "sctid": sctid, "fsn_en": fsn, "confidence": conf
-        }
-    return patch
+    return patch_total
 
 # ============================================================================
 # Confirmación
