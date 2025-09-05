@@ -165,7 +165,8 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[list[str], Conve
         faltan = _missing_mod0_required(state)
         if faltan:
             # no avanzar; explicar y pedir solo lo faltante
-            messages.append(confirm)
+            if confirm:  # solo si hay algo para mostrar
+                messages.append(confirm)
             messages.append("Me faltó completar estos campos. Copiá y pegá este mini-formulario y rellenalo:")
             messages.append(_missing_form_snippet(faltan))
             state._last_failed_module = module_idx
@@ -178,9 +179,13 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[list[str], Conve
     # 5) Siguiente prompt
     next_idx, next_prompt = advance_module(state)
     if next_idx is None:
-        messages.append(f"{confirm} ¡Listo! Completamos todos los bloques.")
+        if confirm:
+            messages.append(f"{confirm} ¡Listo! Completamos todos los bloques.")
+        else:
+            messages.append("¡Listo! Completamos todos los bloques.")
     else:
-        messages.append(confirm)
+        if confirm:
+            messages.append(confirm)
         messages.append(next_prompt)
 
     return messages, state
@@ -203,33 +208,32 @@ async def webhook(req: Request):
     if message_id:
         state._handled_msg_ids.add(message_id)
 
-    replies: list[str] = []
-
-    # Primer contacto: decidir según si el primer mensaje ya trae datos
+    # Primer contacto: SIEMPRE saludar. Si no trae datos, enviar formulario.
     if not state._has_greeted:
-        # preview parse: ¿hay algo útil en el texto entrante?
-        preview = fill_from_text_modular(state, state.module_idx, text or "") or {}
-        has_data = bool(preview and (preview.get("ficha") or preview))
+        saludo = (
+            "Hola, vamos a completar tu ficha anestesiologica."
+        )
+        wa_client.send_message(message=saludo, recipient_id=user_id)
 
         state._has_greeted = True
         save_state(state)
 
+        preview = fill_from_text_modular(state, state.module_idx, text or "") or {}
+        has_data = bool(preview and (preview.get("ficha") or preview))
         if not has_data:
-            saludo = (
-                "Hola, vamos a completar tu ficha anestesiologica.\n\n"
-                "COPIA, PEGA Y RELLENA CON TUS DATOS EL SIGUIENTE FORMULARIO"
+            wa_client.send_message(
+                message="COPIA, PEGA Y RELLENA CON TUS DATOS EL SIGUIENTE FORMULARIO",
+                recipient_id=user_id,
             )
-            # Mandamos saludo + formulario y no procesamos más
-            wa_client.send_message(message=saludo, recipient_id=user_id)
             wa_client.send_message(message=MODULES[0]['prompt'], recipient_id=user_id)
             return JSONResponse({
                 "to": user_id,
                 "echo_text": text,
-                "replies": [saludo, MODULES[0]["prompt"]],
-                "sent": [True, True],
+                "replies": [saludo, "COPIA, PEGA Y RELLENA CON TUS DATOS EL SIGUIENTE FORMULARIO", MODULES[0]["prompt"]],
+                "sent": [True, True, True],
                 "module": MODULES[state.module_idx]["name"],
             })
-        # Si trae datos, seguimos al triage normal usando ese mismo texto.
+        # Si trae datos, seguimos al triage normal con ese mismo texto.
 
     # Anti-bucle
     if text == state._last_text and state._last_failed_module == state.module_idx:
@@ -241,7 +245,7 @@ async def webhook(req: Request):
     state._last_text = text
 
     sent = []
-    for msg in (replies + messages):
+    for msg in (messages or []):
         if not msg:
             continue
         try:
@@ -253,7 +257,7 @@ async def webhook(req: Request):
     return JSONResponse({
         "to": user_id,
         "echo_text": text,
-        "replies": replies + messages,
+        "replies": messages,
         "sent": sent,
         "module": MODULES[state.module_idx]["name"] if 0 <= state.module_idx < len(MODULES) else None,
     })
