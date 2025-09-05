@@ -1,32 +1,30 @@
-# core/steps.py
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
 import re
+from datetime import datetime, date
 
 # ============================================================================
 # Definición de MÓDULOS (en orden)
+#   >> Módulo 0 unifica: DNI + Datos personales + Antropometría + Cobertura/Motivo
+#      con prompt "regex-friendly" para WhatsApp. El resto de módulos siguen igual.
 # ============================================================================
 MODULES = [
     {
-        "name": "DNI",
-        "use_llm": False,
-        "prompt": "Para empezar, decime tu DNI (solo números, sin puntos ni espacios). Ej: 12345678",
-    },
-    {
-        "name": "Datos personales",
-        "use_llm": False,
-        "prompt": "Nombre y apellido, y tu fecha de nacimiento (dd/mm/aaaa). También podés indicar sexo (M/F).",
-    },
-    {
-        "name": "Antropometría",
-        "use_llm": False,
-        "prompt": "Decime peso (kg) y talla (cm o en metros). Ej: 'Peso 70 kg y mido 1.65 m'.",
-    },
-    {
-        "name": "Cobertura y motivo",
-        "use_llm": False,
-        "prompt": "¿Cuál es tu obra social (o prepaga) y nro. de afiliado? ¿Motivo de la cirugía?",
+        "name": "Datos generales",
+        "use_llm": True,  # fallback como respaldo
+        "prompt": (
+            "Completemos tus datos (copiá este bloque y rellená):\n\n"
+            "Nombre y apellido: ...\n"
+            "DNI (solo números): ...\n"
+            "Fecha nacimiento (dd/mm/aaaa): ...\n"
+            "Peso kg (ej 72.5): ...\n"
+            "Talla cm (ej 170): ...\n"
+            "Obra social: ...\n"
+            "N° afiliado: ...\n"
+            "Motivo de consulta (breve): ...\n\n"
+            "(Fecha de evaluación: ... )"  # opcional
+        ),
     },
     {
         "name": "Alergias y medicación",
@@ -76,8 +74,8 @@ def merge_state(state: Any, patch: Dict[str, Any]) -> Any:
     """
     Fusiona un patch en el estado.
     Acepta tanto {"ficha": {...}} como {...} directo.
-    - Si state.ficha es dict -> asignación por clave
-    - Si state.ficha es modelo/objeto -> setattr si el atributo existe
+    - Si state.ficha es dict -> asignación por clave (shallow)
+    - Si state.ficha es modelo/objeto -> setattr de nivel superior (Pydantic hace parse interno)
     Ignora claves internas (empiezan con "_").
     """
     _ensure_ficha(state)
@@ -128,180 +126,322 @@ def advance_module(state: Any) -> Tuple[Optional[int], Optional[str]]:
 # Regex y parsers específicos por módulo
 # ============================================================================
 
-# Saludo/inicio
-_GREETING_RE = re.compile(
-    r"^\s*(hola|buenas|hey|hi|qué\s*tal|buen\s*d[ií]a|buenas\s*tardes|buenas\s*noches)\b",
-    re.IGNORECASE,
-)
+# Bloque guiado etiquetas (Módulo 0)
+_RE_FLAGS = re.IGNORECASE | re.MULTILINE
 
-# DNI
-_DNI_RE = re.compile(r"\b(?P<dni>\d{6,10})\b")
+_RE_NOMBRE = re.compile(r"^nombre y apellido:\s*([A-Za-zÁÉÍÓÚÜÑñ'´`\- ]{3,}(?:\s+[A-Za-zÁÉÍÓÚÜÑñ'´`\- ]{2,})+)\s*$", _RE_FLAGS)
+_RE_DNI_LABELED = re.compile(r"^dni.*?:\s*([0-9][0-9.\s]{5,})$", _RE_FLAGS)
+_RE_FNAC = re.compile(r"^fecha nacimiento.*?:\s*(\d{1,2}/\d{1,2}/\d{4})$", _RE_FLAGS)
+_RE_PESO = re.compile(r"^peso.*?kg.*?:\s*([0-9]{1,3}(?:[.,][0-9]{1,2})?)$", _RE_FLAGS)
+_RE_TALLA = re.compile(r"^talla.*?cm.*?:\s*([0-9]{2,3})$", _RE_FLAGS)
+_RE_OS = re.compile(r"^obra social:\s*([A-Za-zÁÉÍÓÚÜÑñ0-9 .,'\-]{2,60})$", _RE_FLAGS)
+_RE_AFIL = re.compile(r"^(?:n°|nº|num(?:ero)?)[\s_-]*afiliad[oa]:\s*([A-Za-z0-9\-./]{3,30})$", _RE_FLAGS)
+_RE_MOTIVO = re.compile(r"^motivo.*?:\s*(.{5,200})$", _RE_FLAGS)
+_RE_FECHA_EVAL = re.compile(r"^fecha.*evaluaci[oó]n.*?:\s*(\d{1,2}/\d{1,2}/\d{4})$", _RE_FLAGS)
 
-# Datos personales
-_NAME_RE = re.compile(r"(?:me\s+llamo|soy|nombre\s*:?\s*)(?P<nombre>[\wÀ-ÿ'´`\- ]{3,})", re.IGNORECASE)
-_DOB_RE = re.compile(r"\b(?P<d>\d{1,2})[/-](?P<m>\d{1,2})[/-](?P<y>\d{2,4})\b")
-_SEX_RE = re.compile(r"\b(?P<sexo>[MFmf])\b")
+# Fallbacks (libre) reutilizando ideas previas
+_GREETING_RE = re.compile(r"^\s*(hola|buenas|hey|hi|qué\s*tal|buen\s*d[ií]a|buenas\s*tardes|buenas\s*noches)\b", re.IGNORECASE)
+_DNI_FREE_RE = re.compile(r"\b(?P<dni>\d{6,10})\b")
+_NAME_FREE_RE = re.compile(r"(?:me\s+llamo|soy|nombre\s*:?\s*)(?P<nombre>[\wÀ-ÿ'´`\- ]{3,})", re.IGNORECASE)
+_DOB_FREE_RE = re.compile(r"\b(?P<d>\d{1,2})[/-](?P<m>\d{1,2})[/-](?P<y>\d{2,4})\b")
+_WEIGHT_FREE_RE = re.compile(r"(?:peso|pesa|kg)\D{0,5}(?P<peso>\d{1,3}(?:[.,]\d{1,2})?)", re.IGNORECASE)
+_HEIGHT_FREE_CM_RE = re.compile(r"(?:mido|talla|altura|cm|mts?|metros?)\D{0,5}(?P<talla>\d{2,3})(?:[.,]\d+)?", re.IGNORECASE)
+_HEIGHT_FREE_M_RE = re.compile(r"\b(?P<metros>1(?:[.,]\d{1,2})|0[.,]\d{1,2})\s*m", re.IGNORECASE)
+_OS_FREE_RE = re.compile(r"(?:obra\s+social|prepaga|cobertura)\s*:?\s*[- ]*(?P<os>[A-Za-zÀ-ÿ0-9\. '\-]{2,})", re.IGNORECASE)
+_AFIL_FREE_RE = re.compile(r"(?:nro?\.?\s*afiliad[oa]|afiliad[oa])\s*:?\s*[- ]*(?P<afil>[A-Za-z0-9\-\.]{3,,})", re.IGNORECASE)
+_MOTIVO_FREE_RE = re.compile(r"(?:motivo|cirug[ií]a|procedimiento)\s*:?\s*[- ]*(?P<motivo>[\wÀ-ÿ0-9,\. '\-]{3,})", re.IGNORECASE)
 
-# Antropometría
-_WEIGHT_RE = re.compile(r"(?:peso|pesa|kg)\D{0,5}(?P<peso>\d{1,3})(?:[.,]\d+)?", re.IGNORECASE)
-_HEIGHT_RE = re.compile(r"(?:mido|talla|altura|cm|mts?|metros?)\D{0,5}(?P<talla>\d{2,3})(?:[.,]\d+)?", re.IGNORECASE)
-_HEIGHT_M_RE = re.compile(r"\b(?P<metros>1(?:[.,]\d{1,2})|0[.,]\d{1,2})\s*m", re.IGNORECASE)
 
-# Cobertura
-_OS_RE = re.compile(r"(?:obra\s+social|prepaga|cobertura)\s*:?\s*[- ]*(?P<os>[A-Za-zÀ-ÿ0-9\. '\-]{2,})", re.IGNORECASE)
-_AFIL_RE = re.compile(r"(?:nro?\.?\s*afiliad[oa]|afiliad[oa])\s*:?\s*[- ]*(?P<afil>[A-Za-z0-9\-\.]{4,})", re.IGNORECASE)
-_MOTIVO_RE = re.compile(r"(?:motivo|cirug[ií]a|procedimiento)\s*:?\s*[- ]*(?P<motivo>[\wÀ-ÿ0-9,\. '\-]{3,})", re.IGNORECASE)
+def _norm_year(y: int) -> int:
+    if y < 100:
+        # ayudar a compatibilidad de años 2 dígitos
+        century = 2000 if y <= 21 else 1900
+        return century + y
+    return y
 
-# Alergias/medicación
+
+def _parse_date_ddmmyyyy(s: str) -> Optional[str]:
+    try:
+        d, m, y = s.split("/")
+        dt = date(int(y), int(m), int(d))
+        if dt > date.today():
+            return None
+        return f"{int(d):02d}/{int(m):02d}/{int(y):04d}"
+    except Exception:
+        return None
+
+
+def _calc_edad(fecha_nac_ddmmyyyy: Optional[str]) -> Optional[int]:
+    if not fecha_nac_ddmmyyyy:
+        return None
+    try:
+        d, m, y = map(int, fecha_nac_ddmmyyyy.split("/"))
+        born = date(y, m, d)
+        today = date.today()
+        years = today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+        return max(0, years)
+    except Exception:
+        return None
+
+
+def _calc_imc(peso_kg: Optional[float], talla_cm: Optional[int]) -> Optional[float]:
+    try:
+        if not peso_kg or not talla_cm:
+            return None
+        m = talla_cm / 100.0
+        if m <= 0:
+            return None
+        return round(peso_kg / (m * m), 1)
+    except Exception:
+        return None
+
+
+# ---------------- MÓDULO 0: DATOS GENERALES ----------------
+
+def _parse_generales(text: str) -> Dict[str, Any]:
+    text = text or ""
+
+    # Saludo simple para no fallar en el primer input
+    if _GREETING_RE.search(text.strip()):
+        return {"_start": True}
+
+    # 1) Intento bloque etiquetado (alta precisión)
+    nombre = (_RE_NOMBRE.search(text) or [None, None])[1]
+    dni_raw = (_RE_DNI_LABELED.search(text) or [None, None])[1]
+    fnac = (_RE_FNAC.search(text) or [None, None])[1]
+    peso_s = (_RE_PESO.search(text) or [None, None])[1]
+    talla_s = (_RE_TALLA.search(text) or [None, None])[1]
+    os_ = (_RE_OS.search(text) or [None, None])[1]
+    afiliado = (_RE_AFIL.search(text) or [None, None])[1]
+    motivo = (_RE_MOTIVO.search(text) or [None, None])[1]
+    feval = (_RE_FECHA_EVAL.search(text) or [None, None])[1]
+
+    # 2) Fallback libre (si faltan campos)
+    if not nombre:
+        m = _NAME_FREE_RE.search(text)
+        if m:
+            nombre = " ".join(m.group("nombre").split())
+    if not dni_raw:
+        m = _DNI_FREE_RE.search(text)
+        if m:
+            dni_raw = m.group("dni")
+    if not fnac:
+        m = _DOB_FREE_RE.search(text)
+        if m:
+            d = int(m.group("d")); mth = int(m.group("m")); y = _norm_year(int(m.group("y")))
+            fnac = f"{d:02d}/{mth:02d}/{y:04d}"
+    if not peso_s:
+        m = _WEIGHT_FREE_RE.search(text)
+        if m:
+            peso_s = m.group("peso")
+    if not talla_s:
+        m = _HEIGHT_FREE_CM_RE.search(text)
+        if m:
+            talla_s = m.group("talla")
+        else:
+            m2 = _HEIGHT_FREE_M_RE.search(text)
+            if m2:
+                try:
+                    metros = float(m2.group("metros").replace(",", "."))
+                    talla_s = str(int(round(metros * 100)))
+                except Exception:
+                    pass
+    if not os_:
+        m = _OS_FREE_RE.search(text)
+        if m:
+            os_ = m.group("os").strip()
+    if not afiliado:
+        m = _AFIL_FREE_RE.search(text)
+        if m:
+            afiliado = m.group("afil").strip()
+    if not motivo:
+        m = _MOTIVO_FREE_RE.search(text)
+        if m:
+            motivo = m.group("motivo").strip()
+
+    # 3) Normalizaciones y validaciones
+    out_dni: Optional[str] = None
+    if dni_raw:
+        cleaned = re.sub(r"[.\s]", "", dni_raw)
+        if cleaned.isdigit():
+            # 7–9 dígitos preferidos; permitir 6–10 y recortar ceros a la izquierda si hace falta
+            cleaned = cleaned.lstrip("0") or "0"
+            if 6 <= len(cleaned) <= 10:
+                out_dni = cleaned
+    fnac_std = _parse_date_ddmmyyyy(fnac) if fnac else None
+
+    peso: Optional[float] = None
+    if peso_s:
+        try:
+            peso = float(peso_s.replace(",", "."))
+            if not (20 <= peso <= 300):
+                peso = None
+        except Exception:
+            peso = None
+
+    talla: Optional[int] = None
+    if talla_s:
+        try:
+            t = int(talla_s)
+            if 100 <= t <= 230:
+                talla = t
+        except Exception:
+            talla = None
+
+    os_val = (os_ or "").strip(" -:") or None
+    afiliado_val = (afiliado or "").strip() or None
+    motivo_val = (motivo or "").strip()
+    if motivo_val:
+        motivo_val = motivo_val[:200]
+    else:
+        motivo_val = None
+
+    feval_std = _parse_date_ddmmyyyy(feval) if feval else None
+    if not feval_std:
+        today = date.today()
+        feval_std = f"{today.day:02d}/{today.month:02d}/{today.year:04d}"
+
+    edad = _calc_edad(fnac_std)
+    imc = _calc_imc(peso, talla)
+
+    # 4) Construcción del patch anidado según schemas
+    ficha: Dict[str, Any] = {}
+
+    if out_dni:
+        ficha["dni"] = out_dni
+
+    datos: Dict[str, Any] = {}
+    if nombre:
+        datos["nombre_completo"] = nombre
+    if fnac_std:
+        # pydantic parseará dd/mm/aaaa -> date si tu Conversor lo hace; si no, dejalo como str
+        datos["fecha_nacimiento"] = fnac_std
+    if edad is not None:
+        datos["edad"] = edad
+    if feval_std:
+        datos["fecha_evaluacion"] = feval_std
+    if datos:
+        ficha["datos"] = datos
+
+    antropo: Dict[str, Any] = {}
+    if peso is not None:
+        antropo["peso_kg"] = peso
+    if talla is not None:
+        antropo["talla_cm"] = talla
+    if imc is not None:
+        antropo["imc"] = imc
+    if antropo:
+        ficha["antropometria"] = antropo
+
+    cobertura: Dict[str, Any] = {}
+    if os_val:
+        cobertura["obra_social"] = os_val
+    if afiliado_val:
+        cobertura["afiliado"] = afiliado_val
+    if motivo_val:
+        cobertura["motivo_cirugia"] = motivo_val
+    if cobertura:
+        ficha["cobertura"] = cobertura
+
+    # Si no se obtuvo nada, devolver vacío
+    if not ficha:
+        return {}
+
+    return {"ficha": ficha}
+
+
+# ---------------- RESTO DE PARSERS (módulos 1..5) ----------------
+# Reaprovechamos regex previas del proyecto original para no romper flujos.
 _ALERG_RE = re.compile(r"(?:alergias?|al[ée]rgico[as]?)\s*:?\s*[- ]*(?P<alergias>.+)", re.IGNORECASE)
 _MEDIC_RE = re.compile(r"(?:medicaci[oó]n|tomo|tomas|toma)\s*:?\s*[- ]*(?P<medicacion>.+)", re.IGNORECASE)
 
-# Antecedentes
 _ANTEC_RE = re.compile(r"(?:antecedentes?|enfermedades?|patolog[ií]a?s?)\s*:?\s*[- ]*(?P<antecedentes>.+)", re.IGNORECASE)
 
-# Complementarios
 _COMPL_RE = re.compile(r"(?:estudios?|laboratorio|lab[s]?|electro|ecg|rx|placa|tc|mri|rmn)\s*:?\s*[- ]*(?P<complementarios>.+)", re.IGNORECASE)
 
-# Sustancias
 _TABA_RE = re.compile(r"(?:tabaco|fumo|fum[oé]s?|cigarrillos?)\s*:?\s*[- ]*(?P<tabaco>.+)", re.IGNORECASE)
 _ALCO_RE = re.compile(r"(?:alcohol|beb[eo]s?)\s*:?\s*[- ]*(?P<alcohol>.+)", re.IGNORECASE)
 _OTRAS_RE = re.compile(r"(?:drogas?|sustancias?)\s*:?\s*[- ]*(?P<otras>.+)", re.IGNORECASE)
 
-# Vía aérea
 _VA_RE = re.compile(r"(?:v[ií]a\s*a[ée]rea|mallampati|apertura|bucal|dentari[ao]s?|piezas|pr[oó]tesis)\s*:?\s*[- ]*(?P<via_aerea>.+)", re.IGNORECASE)
 
-def _norm_year(y: int) -> int:
-    if y < 100:
-        return 2000 + y if y <= 21 else 1900 + y
-    return y
-
-# ---------------- DNI ----------------
-def _parse_dni(text: str) -> Dict[str, Any]:
-    # Saludo inicial: avanza sin error
-    if _GREETING_RE.search(text.strip()):
-        return {"_start": True}
-    m = _DNI_RE.search(text)
-    if m:
-        return {"dni": m.group("dni")}
-    return {}
-
-# ---------------- DATOS PERSONALES ----------------
-def _parse_datos(text: str) -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
-    mname = _NAME_RE.search(text)
-    if mname:
-        out["nombre_completo"] = " ".join(mname.group("nombre").split())
-    mdob = _DOB_RE.search(text)
-    if mdob:
-        d = int(mdob.group("d")); m = int(mdob.group("m")); y = _norm_year(int(mdob.group("y")))
-        if 1 <= d <= 31 and 1 <= m <= 12 and 1900 <= y <= 2100:
-            out["fecha_nacimiento"] = f"{d:02d}/{m:02d}/{y:04d}"
-    msex = _SEX_RE.search(text)
-    if msex:
-        out["sexo"] = msex.group("sexo").upper()
-    return out
-
-# ---------------- ANTROPOMETRÍA ----------------
-def _parse_antropometria(text: str) -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
-    mw = _WEIGHT_RE.search(text)
-    if mw:
-        try:
-            out["peso_kg"] = int(mw.group("peso"))
-        except Exception:
-            pass
-    mh = _HEIGHT_RE.search(text)
-    if mh:
-        try:
-            out["talla_cm"] = int(mh.group("talla"))
-        except Exception:
-            pass
-    mm = _HEIGHT_M_RE.search(text)
-    if mm and "talla_cm" not in out:
-        try:
-            metros = float(mm.group("metros").replace(",", "."))
-            out["talla_cm"] = int(round(metros * 100))
-        except Exception:
-            pass
-    return out
-
-# ---------------- COBERTURA ----------------
-def _parse_cobertura(text: str) -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
-    mo = _OS_RE.search(text)
-    if mo:
-        val = mo.group("os").strip(" -:")
-        if val:
-            out["obra_social"] = val
-    maf = _AFIL_RE.search(text)
-    if maf:
-        out["nro_afiliado"] = maf.group("afil").strip()
-    mm = _MOTIVO_RE.search(text)
-    if mm:
-        out["motivo_cirugia"] = mm.group("motivo").strip()
-    return out
 
 # ---------------- ALERGIAS / MEDICACIÓN ----------------
+
 def _parse_alerg_med(text: str) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
-    ma = _ALERG_RE.search(text)
+    ma = _ALERG_RE.search(text or "")
     if ma:
-        out["alergias"] = ma.group("alergias").strip()
-    mm = _MEDIC_RE.search(text)
+        out.setdefault("alergia_medicacion", {})
+        out["alergia_medicacion"]["alergias"] = {"tiene_alergias": True, "detalle": [{"sustancia": ma.group("alergias").strip()}]}
+    mm = _MEDIC_RE.search(text or "")
     if mm:
-        out["medicacion"] = mm.group("medicacion").strip()
-    return out
+        out.setdefault("alergia_medicacion", {})
+        out["alergia_medicacion"].setdefault("medicacion_habitual", [])
+        out["alergia_medicacion"]["medicacion_habitual"].append({"droga": mm.group("medicacion").strip()})
+    if not out:
+        return {}
+    return {"ficha": out}
+
 
 # ---------------- ANTECEDENTES ----------------
+
 def _parse_antecedentes(text: str) -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
-    m = _ANTEC_RE.search(text)
-    if m:
-        out["antecedentes"] = m.group("antecedentes").strip()
-    return out
+    m = _ANTEC_RE.search(text or "")
+    if not m:
+        return {}
+    return {"ficha": {"antecedentes": {"otros": [m.group("antecedentes").strip()]}}}
+
 
 # ---------------- COMPLEMENTARIOS ----------------
+
 def _parse_complementarios(text: str) -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
-    m = _COMPL_RE.search(text)
-    if m:
-        out["complementarios"] = m.group("complementarios").strip()
-    return out
+    m = _COMPL_RE.search(text or "")
+    if not m:
+        return {}
+    return {"ficha": {"complementarios": {"imagenes": [{"estudio": m.group("complementarios").strip()}]}}}
+
 
 # ---------------- SUSTANCIAS ----------------
+
 def _parse_sustancias(text: str) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
-    mt = _TABA_RE.search(text)
+    mt = _TABA_RE.search(text or "")
     if mt:
-        out["tabaco"] = mt.group("tabaco").strip()
-    ma = _ALCO_RE.search(text)
+        out.setdefault("sustancias", {})
+        out["sustancias"]["tabaco"] = {"consume": True, "ultimo_consumo": mt.group("tabaco").strip()}
+    ma = _ALCO_RE.search(text or "")
     if ma:
-        out["alcohol"] = ma.group("alcohol").strip()
-    mo = _OTRAS_RE.search(text)
+        out.setdefault("sustancias", {})
+        out["sustancias"]["alcohol"] = {"consume": True}
+    mo = _OTRAS_RE.search(text or "")
     if mo:
-        out["otras_sustancias"] = mo.group("otras").strip()
-    return out
+        out.setdefault("sustancias", {})
+        out["sustancias"]["otras"] = {"consume": True, "detalle": [mo.group("otras").strip()]}
+    if not out:
+        return {}
+    return {"ficha": out}
+
 
 # ---------------- VÍA AÉREA ----------------
+
 def _parse_via_aerea(text: str) -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
-    m = _VA_RE.search(text)
-    if m:
-        out["via_aerea"] = m.group("via_aerea").strip()
-    return out
+    m = _VA_RE.search(text or "")
+    if not m:
+        return {}
+    return {"ficha": {"via_aerea": {"otros": [m.group("via_aerea").strip()]}}}
+
 
 # Mapa índice -> parser
 _PARSERS = {
-    0: _parse_dni,
-    1: _parse_datos,
-    2: _parse_antropometria,
-    3: _parse_cobertura,
-    4: _parse_alerg_med,
-    5: _parse_antecedentes,
-    6: _parse_complementarios,
-    7: _parse_sustancias,
-    8: _parse_via_aerea,
+    0: _parse_generales,
+    1: _parse_alerg_med,
+    2: _parse_antecedentes,
+    3: _parse_complementarios,
+    4: _parse_sustancias,
+    5: _parse_via_aerea,
 }
+
 
 def fill_from_text_modular(state: Any, module_idx: int, text: str) -> Dict[str, Any]:
     """
@@ -315,11 +455,20 @@ def fill_from_text_modular(state: Any, module_idx: int, text: str) -> Dict[str, 
     data = parser(text or "")
     if not data:
         return {}
-    return {"ficha": data}
+    return data
+
 
 def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
-    """Placeholder para parsers basados en LLM si activás use_llm=True en algún módulo."""
+    """Parser de respaldo: pedir al LLM solo si el módulo lo permite y regex no extrajo nada."""
+    # Instrucción resumida para tu agente LLM (se envía desde tu servicio llamador)
+    # "Extraé: nombre_apellido, dni (solo dígitos), fecha_nacimiento (dd/mm/aaaa), peso_kg, talla_cm, obra_social, afiliado, motivo_consulta (máx 200), fecha_evaluacion.\n"
+    # "Devolvé JSON con la forma de FichaPreanestesia anidada. No inventes."
     return {}
+
+
+def _fmt(v: Any) -> str:
+    return "-" if v in (None, "", []) else str(v)
+
 
 def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> str:
     """
@@ -333,10 +482,36 @@ def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> 
     if module_idx == 0 and "_start" in ficha and len(ficha) == 1:
         return "¡Hola! Empecemos."
 
+    # Módulo 0 tiene confirmación rica con derivados
+    if module_idx == 0:
+        dni = ficha.get("dni")
+        datos = ficha.get("datos", {}) if isinstance(ficha.get("datos"), dict) else {}
+        antropo = ficha.get("antropometria", {}) if isinstance(ficha.get("antropometria"), dict) else {}
+        cob = ficha.get("cobertura", {}) if isinstance(ficha.get("cobertura"), dict) else {}
+        nombre = datos.get("nombre_completo")
+        fnac = datos.get("fecha_nacimiento")
+        edad = datos.get("edad")
+        feval = datos.get("fecha_evaluacion")
+        peso = antropo.get("peso_kg")
+        talla = antropo.get("talla_cm")
+        imc = antropo.get("imc")
+        os_ = cob.get("obra_social")
+        afil = cob.get("afiliado")
+        motivo = cob.get("motivo_cirugia")
+        lineas = [
+            "✔️ Registré:",
+            f"• { _fmt(nombre) } — DNI { _fmt(dni) }",
+            f"• Nac.: { _fmt(fnac) } ({ _fmt(edad) } años) — Eval.: { _fmt(feval) }",
+            f"• Peso { _fmt(peso) } kg, Talla { _fmt(talla) } cm, IMC { _fmt(imc) }",
+            f"• Obra social: { _fmt(os_) } — Afiliado: { _fmt(afil) }",
+            f"• Motivo: { _fmt(motivo) }",
+        ]
+        return "\n".join(lineas)
+
+    # Otros módulos: genérico
     public_items = [(k, v) for k, v in ficha.items() if not str(k).startswith("_")]
     if not public_items:
         return "No pude extraer datos de este bloque."
-
     modulo_name = MODULES[module_idx]["name"] if 0 <= module_idx < len(MODULES) else "Bloque"
     joined = "; ".join(f"{k}: {v}" for k, v in public_items)
     return f"Anoté en {modulo_name}: {joined}."
