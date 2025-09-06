@@ -49,7 +49,9 @@ def save_state(state: ConversationState):
 
 # ====== Helpers ======
 def _extract_incoming(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
-    """Devuelve (text, message_id) o ('__IGNORE__', None) si es status/otro tipo."""
+    """Devuelve (text, message_id) o ('__IGNORE__', None) si es status/otro tipo.
+    Soporta text e interactive.button_reply / interactive.list_reply.
+    """
     try:
         entry = payload.get("entry", [])[0]
         change = entry.get("changes", [])[0]
@@ -63,11 +65,25 @@ def _extract_incoming(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
             msg = msgs[0]
             msg_type = msg.get("type")
             msg_id = msg.get("id")
+
             if msg_type == "text":
                 body = (msg.get("text", {}) or {}).get("body", "") or ""
                 return body, msg_id
-            else:
-                return "__IGNORE__", msg_id
+
+            if msg_type == "interactive":
+                it = msg.get("interactive", {}) or {}
+                # Button
+                if it.get("type") == "button_reply":
+                    br = it.get("button_reply", {}) or {}
+                    # Usamos el 'id' como payload estable; el 'title' es visible para usuario.
+                    return (br.get("id") or br.get("title") or "").strip(), msg_id
+                # List
+                if it.get("type") == "list_reply":
+                    lr = it.get("list_reply", {}) or {}
+                    return (lr.get("id") or lr.get("title") or "").strip(), msg_id
+
+            # otros tipos no los procesamos
+            return "__IGNORE__", msg_id
     except Exception:
         pass
 
@@ -146,6 +162,43 @@ def _count_core_fields_in_patch(preview: Dict[str, Any]) -> int:
     if _has(_dig(p, ["cobertura", "motivo_cirugia"])): c += 1
     return c
 
+# ====== UI Helpers: botones interactivos ======
+ALG_BTN_NO_ID = "ALG_NO"  # payload estable
+ALG_BTN_SI_ID = "ALG_SI"
+
+def _send_alergias_buttons(user_id: str):
+    """
+    Envía botones 'No, sin alergias' y 'Sí, tengo alergias'.
+    Usamos send_button de heyoo (WhatsApp Cloud API: interactive buttons).
+    """
+    try:
+        wa_client.send_button(
+            recipient_id=user_id,
+            button={"title": "Elegí una opción"},
+            buttons=[
+                {"type": "reply", "reply": {"id": ALG_BTN_NO_ID, "title": "No, sin alergias"}},
+                {"type": "reply", "reply": {"id": ALG_BTN_SI_ID, "title": "Sí, tengo alergias"}},
+            ],
+            body=(
+                "¿Tenés *alguna alergia conocida*? Podés elegir una opción.\n"
+                "Si marcás que *sí*, después te pregunto a qué sos alérgico y qué te pasó."
+            ),
+        )
+        return True
+    except Exception:
+        # fallback: texto plano si falla interactive
+        try:
+            wa_client.send_message(
+                message=(
+                    "¿Tenés *alguna alergia conocida*?\n"
+                    "Respondé 1) No, sin alergias  ó  2) Sí, tengo alergias"
+                ),
+                recipient_id=user_id,
+            )
+        except Exception:
+            pass
+        return False
+
 # ====== Core TRIAGE ======
 def _triage_block(state: ConversationState, text: str) -> Tuple[list[str], ConversationState]:
     module_idx = state.module_idx
@@ -210,7 +263,7 @@ async def webhook(req: Request):
     if message_id:
         state._handled_msg_ids.add(message_id)
 
-    # Primer contacto: SIEMPRE saludar y decidir si pedir formulario completo
+    # PRIMER CONTACTO
     if not state._has_greeted:
         saludo = "Hola, vamos a completar tu ficha anestesiologica."
         try: wa_client.send_message(message=saludo, recipient_id=user_id)
@@ -241,6 +294,61 @@ async def webhook(req: Request):
             })
         # Si trae ≥3 campos, seguimos al triage con ese mismo texto.
 
+    # ------ Atajos para botones de Alergias ------
+    # Si el usuario presiona “No, sin alergias”: guardamos y seguimos flujo normal.
+    if text == ALG_BTN_NO_ID and state.module_idx == 1:
+        # Marcar sin alergias
+        patch = {
+            "ficha": {
+                "alergia_medicacion": {
+                    "alergias": {"tiene_alergias": False, "detalle": []}
+                }
+            }
+        }
+        state = merge_state(state, patch)
+        # Forzar confirm y avanzar a siguiente módulo (medicación)
+        snapshot = {"ficha": _to_dict(getattr(state, "ficha", {}))}
+        confirm = summarize_patch_for_confirmation(snapshot, 1)
+        # Avanzamos manualmente
+        state.module_idx = 2  # Medicación
+        save_state(state)
+
+        # Enviamos confirmación y prompt del siguiente módulo
+        sent = []
+        try:
+            if confirm:
+                wa_client.send_message(message=confirm, recipient_id=user_id)
+            wa_client.send_message(message=MODULES[2]["prompt"], recipient_id=user_id)
+            sent = [bool(confirm), True]
+        except Exception:
+            pass
+        return JSONResponse({
+            "to": user_id,
+            "echo_text": text,
+            "replies": [confirm, MODULES[2]["prompt"]],
+            "sent": sent,
+            "module": MODULES[state.module_idx]["name"] if 0 <= state.module_idx < len(MODULES) else None,
+        })
+
+    # Si el usuario presiona “Sí, tengo alergias”: NO avanzar.
+    # Pedimos detalle abierto (sustancia + reacción).
+    if text == ALG_BTN_SI_ID and state.module_idx == 1:
+        q = "Perfecto. Contame *a qué* sos alérgico y *qué te pasó* (por ejemplo: rash/ronchas, hinchazón, falta de aire, shock)."
+        try:
+            wa_client.send_message(message=q, recipient_id=user_id)
+        except Exception:
+            pass
+        # Marcamos que seguimos en el mismo módulo para esperar el detalle.
+        state._last_failed_module = state.module_idx
+        save_state(state)
+        return JSONResponse({
+            "to": user_id,
+            "echo_text": text,
+            "replies": [q],
+            "sent": [True],
+            "module": MODULES[state.module_idx]["name"] if 0 <= state.module_idx < len(MODULES) else None,
+        })
+
     # Anti-bucle
     if text == state._last_text and state._last_failed_module == state.module_idx:
         return JSONResponse({"ok": True, "ignored": "same_text_same_module"})
@@ -251,8 +359,16 @@ async def webhook(req: Request):
     state._last_text = text
 
     sent = []
-    for msg in (messages or []):
-        if not msg: continue
+    # Si el siguiente módulo a llenar es Alergias (idx=1), preferimos enviar BOTONES en vez del prompt plano.
+    for i, msg in enumerate(messages or []):
+        if not msg:
+            continue
+        # Si estamos por pedir Alergias, sustituimos ese mensaje por botones interactivos
+        if state.module_idx == 1 and msg == MODULES[1]["prompt"]:
+            ok = _send_alergias_buttons(user_id)
+            sent.append(ok)
+            continue
+
         try:
             wa_client.send_message(message=msg, recipient_id=user_id)
             sent.append(True)
