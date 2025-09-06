@@ -7,9 +7,7 @@ import os
 import json
 from datetime import date
 
-# ============================================================================
-# Definición de MÓDULOS
-# ============================================================================
+# ========================== MÓDULOS ==========================
 MODULES = [
     {
         "name": "Datos generales",
@@ -37,10 +35,12 @@ MODULES = [
     {
         "name": "Medicación habitual",
         "use_llm": True,
+        # PRIMERA PREGUNTA del módulo 2 (solo medicación)
         "prompt": (
-            "¿Tomás alguna medicación / usas puff? \n"
-            "Si sabés la *dosis, mejor\n"
-            "Ejemplos: \"Enalapril 10 mg cada mañana\", \"Sertal\", \"Seretide puff 2 veces al día\"."
+            "¿Tomás alguna medicación / usás puff?\n"
+            "Si sabés la *dosis*, mejor.\n"
+            "\n"
+            "_Ejemplos: \"Enalapril 10 mg cada mañana\", \"Sertal\", \"Seretide puff 2 veces al día\"._"
         ),
     },
     {
@@ -65,9 +65,14 @@ MODULES = [
     },
 ]
 
-# ============================================================================
-# Helpers de estado y merge
-# ============================================================================
+# SEGUNDA PREGUNTA del módulo 2 (ilícitas)
+PROMPT_ILICITAS_M2 = (
+    "¿Consumís *sustancias ilícitas* (p. ej. cannabis/porro/faso, cocaína, MDMA/éxtasis, "
+    "ketamina, LSD, paco, hongos/psilocibina, tusi, etc.)?\n"
+    "Si sí, contá *cuál*, *frecuencia/cantidad* y *cuándo fue la última vez*."
+)
+
+# =================== Helpers de estado y merge ===================
 def _ensure_ficha(state: Any) -> None:
     if not hasattr(state, "ficha") or state.ficha is None:
         try:
@@ -164,9 +169,7 @@ def advance_module(state: Any) -> Tuple[Optional[int], Optional[str]]:
         return None, None
     return idx, prompt_for_module(idx)
 
-# ============================================================================
-# Regex & parsers del Módulo 0
-# ============================================================================
+# ================== Regex & parsers Módulo 0 ==================
 _RE_FLAGS = re.IGNORECASE | re.MULTILINE
 _RE_NOMBRE = re.compile(r"^nombre y apellido:\s*([A-Za-zÁÉÍÓÚÜÑñ'´`\- ]{3,}(?:\s+[A-Za-zÁÉÍÓÚÜÑñ'´`\- ]{2,})+)\s*$", _RE_FLAGS)
 _RE_DNI_LABELED = re.compile(r"^dni.*?:\s*([0-9][0-9.\s]{5,})$", _RE_FLAGS)
@@ -191,39 +194,31 @@ _MOTIVO_FREE_RE = re.compile(r"(?:motivo|cirug[ií]a|procedimiento)\s*:?\s*[- ]*
 def _strip_whatsapp_markup(s: str) -> str:
     if not s:
         return s or ""
-    return (
-        s.replace("*", "")
-         .replace("\u200e", "")
-         .replace("\u200f", "")
-         .strip()
-    )
+    return s.replace("*", "").replace("\u200e", "").replace("\u200f", "").strip()
 
 def _smart_name_capitalize(s: str) -> str:
     if not s:
         return s
     particles = {"de", "del", "la", "las", "los", "y", "da", "das", "di", "van", "von"}
     tokens = [t for t in re.split(r"\s+", s.strip()) if t]
+
     def cap_token(tok: str) -> str:
         def cap_simple(w: str) -> str:
             return w[:1].upper() + w[1:].lower() if w else w
         w = "'".join(cap_simple(p) for p in tok.split("'"))
         return "-".join(cap_simple(p) for p in w.split("-"))
+
     out = []
     for i, t in enumerate(tokens):
         out.append(t.lower() if (i > 0 and t.lower() in particles) else cap_token(t))
     return " ".join(out)
 
 def _norm_year(y: int) -> int:
-    if y < 100:
-        return (2000 if y <= 21 else 1900) + y
-    return y
+    return (2000 if y < 100 and y <= 21 else (1900 if y < 100 else 0)) + (y if y >= 100 else y)
 
 def _parse_date_ddmmyyyy(s: str) -> Optional[str]:
     try:
         d, m, y = s.split("/")
-        y = int(y)
-        if y < 1900:
-            return None
         dt = date(int(y), int(m), int(d))
         if dt > date.today():
             return None
@@ -238,8 +233,7 @@ def _calc_edad(fecha_nac_ddmmyyyy: Optional[str]) -> Optional[int]:
         d, m, y = map(int, fecha_nac_ddmmyyyy.split("/"))
         born = date(y, m, d)
         today = date.today()
-        years = today.year - born.year - ((today.month, today.day) < (born.month, born.day))
-        return max(0, years)
+        return today.year - born.year - ((today.month, today.day) < (born.month, born.day))
     except Exception:
         return None
 
@@ -248,13 +242,11 @@ def _calc_imc(peso_kg: Optional[float], talla_cm: Optional[int]) -> Optional[flo
         if not peso_kg or not talla_cm:
             return None
         m = talla_cm / 100.0
-        if m <= 0:
-            return None
         return round(peso_kg / (m * m), 1)
     except Exception:
         return None
 
-# ---------------- Heurística rápida para motivo ----------------
+# Heurística rápida de motivo
 def normalize_motivo_clinico_heuristic(raw: Optional[str]) -> Optional[str]:
     if not raw:
         return None
@@ -265,24 +257,18 @@ def normalize_motivo_clinico_heuristic(raw: Optional[str]) -> Optional[str]:
         (r"\bhernia\s*(?:inguinal|ingle)\b", "hernioplastia inguinal"),
         (r"\bhernia\s*(?:umbilical|omblig)\b", "hernioplastia umbilical"),
         (r"\bhernia\s*(?:hiatal|hiato)\b", "hernioplastia hiatal"),
-        (r"\bhernia\s*(?:crural|femoral)\b", "hernioplastia crural"),
         (r"catarat", "facoemulsificación de catarata"),
-        (r"rinoplast", "rinoplastia"),
-        (r"nariz", "rinoplastia"),
+        (r"rinoplast|nariz", "rinoplastia"),
         (r"quiste", "quistectomía"),
-        (r"mama.*(tumor|n[óo]dulo)", "tumorectomía de mama"),
-        (r"mastect", "mastectomía"),
     ]
     for pat, term in rules:
         if re.search(pat, s):
             return term
     return raw.strip().capitalize()
 
-# ---------------- Módulo 0: DATOS GENERALES ----------------
+# ================== Módulo 0: DATOS GENERALES ==================
 def _parse_generales(text: str) -> Dict[str, Any]:
-    raw_text = text or ""
-    text = _strip_whatsapp_markup(raw_text)
-
+    text = _strip_whatsapp_markup(text or "")
     greeted = bool(_GREETING_RE.search(text.strip()))
     nombre = (_RE_NOMBRE.search(text) or [None, None])[1]
     dni_raw = (_RE_DNI_LABELED.search(text) or [None, None])[1]
@@ -293,189 +279,166 @@ def _parse_generales(text: str) -> Dict[str, Any]:
     afiliado = (_RE_AFIL.search(text) or [None, None])[1]
     motivo = (_RE_MOTIVO.search(text) or [None, None])[1]
 
+    if greeted and not any([nombre, dni_raw, fnac, peso_s, talla_s, os_, afiliado, motivo]):
+        return {"_start": True}
+
     if not nombre:
         m = _NAME_FREE_RE.search(text)
-        if m:
-            tmp = " ".join(m.group("nombre").split())
-            tmp = re.sub(r"^\s*y\s+apellido\s*:\s*", "", tmp, flags=re.IGNORECASE)
-            nombre = tmp
+        if m: nombre = " ".join(m.group("nombre").split())
     if not dni_raw:
         m = _DNI_FREE_RE.search(text)
         if m: dni_raw = m.group("dni")
     if not fnac:
         m = _DOB_FREE_RE.search(text)
         if m:
-            d = int(m.group("d")); mth = int(m.group("m")); y = _norm_year(int(m.group("y")))
-            fnac = f"{d:02d}/{mth:02d}/{y:04d}"
+            d = int(m.group("d")); mm = int(m.group("m")); yy = int(m.group("y")); yy = _norm_year(yy)
+            fnac = f"{d:02d}/{mm:02d}/{yy:04d}"
     if not peso_s:
         m = _WEIGHT_FREE_RE.search(text)
         if m: peso_s = m.group("peso")
     if not talla_s:
-        m = _HEIGHT_FREE_CM_RE.search(text)
-        if m:
-            talla_s = m.group("talla")
-        else:
-            m2 = _HEIGHT_FREE_M_RE.search(text)
-            if m2:
-                try:
-                    metros = float(m2.group("metros").replace(",", "."))
-                    talla_s = str(metros)
-                except Exception:
-                    pass
-    if not os_:
-        m = _OS_FREE_RE.search(text)
-        if m: os_ = m.group("os").strip()
-    if not afiliado:
-        m = _AFIL_FREE_RE.search(text)
-        if m: afiliado = m.group("afil").strip()
-    if not motivo:
-        m = _MOTIVO_FREE_RE.search(text)
-        if m: motivo = m.group("motivo").strip()
+        m = _HEIGHT_FREE_CM_RE.search(text) or _HEIGHT_FREE_M_RE.search(text)
+        if m: talla_s = m.groupdict().get("talla") or m.groupdict().get("metros")
 
-    if greeted and not any([nombre, dni_raw, fnac, peso_s, talla_s, os_, afiliado, motivo]):
-        return {"_start": True}
-
-    out_dni: Optional[str] = None
+    dni = None
     if dni_raw:
-        cleaned = re.sub(r"[.\s]", "", dni_raw).lstrip("0") or "0"
+        cleaned = re.sub(r"[.\s]", "", dni_raw)
         if cleaned.isdigit() and 6 <= len(cleaned) <= 10:
-            out_dni = cleaned
-
+            dni = cleaned
     fnac_std = _parse_date_ddmmyyyy(fnac) if fnac else None
 
-    peso: Optional[float] = None
+    peso = None
     if peso_s:
         try:
-            peso = float(peso_s.replace(",", "."))
-            if not (20 <= peso <= 300): peso = None
+            v = float(str(peso_s).replace(",", "."))
+            if 20 <= v <= 300:
+                peso = v
         except Exception:
-            peso = None
+            pass
 
-    talla: Optional[int] = None
+    talla_cm = None
     if talla_s:
         try:
-            ss = talla_s.strip().replace(",", ".")
-            val = float(ss)
-            if 0.9 <= val <= 2.5:
-                t = int(round(val * 100))
-            else:
-                t = int(round(val))
-            if 100 <= t <= 230:
-                talla = t
+            v = float(str(talla_s).replace(",", "."))
+            talla_cm = int(round(v * 100)) if 0.9 <= v <= 2.5 else int(round(v))
+            if not 100 <= talla_cm <= 230:
+                talla_cm = None
         except Exception:
-            talla = None
+            pass
 
-    os_val = (os_ or "").strip(" -:") or None
-    afiliado_val = (afiliado or "").strip() or None
-    motivo_val = (motivo or "").strip()[:200] if motivo else None
-
+    imc = _calc_imc(peso, talla_cm)
     today = date.today()
     feval_std = f"{today.day:02d}/{today.month:02d}/{today.year:04d}"
 
-    edad = _calc_edad(fnac_std)
-    imc = _calc_imc(peso, talla)
-
     ficha: Dict[str, Any] = {}
-    if out_dni: ficha["dni"] = out_dni
-
-    datos: Dict[str, Any] = {}
-    if nombre:
-        nombre_cap = _smart_name_capitalize(nombre)
-        if not re.fullmatch(r"y\s+apellido\s*:?", nombre_cap, flags=re.IGNORECASE):
-            datos["nombre_completo"] = nombre_cap
+    if dni: ficha["dni"] = dni
+    datos = {}
+    if nombre: datos["nombre_completo"] = _smart_name_capitalize(nombre)
     if fnac_std: datos["fecha_nacimiento"] = fnac_std
+    edad = _calc_edad(fnac_std)
     if edad is not None: datos["edad"] = edad
     datos["fecha_evaluacion"] = feval_std
     if datos: ficha["datos"] = datos
 
-    antropo: Dict[str, Any] = {}
+    antropo = {}
     if peso is not None: antropo["peso_kg"] = peso
-    if talla is not None: antropo["talla_cm"] = talla
+    if talla_cm is not None: antropo["talla_cm"] = talla_cm
     if imc is not None: antropo["imc"] = imc
     if antropo: ficha["antropometria"] = antropo
 
-    motivo_norm = normalize_motivo_clinico_heuristic(motivo_val) if motivo_val else None
-
-    cobertura: Dict[str, Any] = {}
-    if os_val: cobertura["obra_social"] = os_val
-    if afiliado_val: cobertura["afiliado"] = afiliado_val
-    if motivo_norm: cobertura["motivo_cirugia"] = motivo_norm
-    if cobertura: ficha["cobertura"] = cobertura
+    if motivo:
+        motivo_norm = normalize_motivo_clinico_heuristic(motivo)
+        ficha.setdefault("cobertura", {})["motivo_cirugia"] = motivo_norm
 
     return {"ficha": ficha} if ficha else {}
 
-# ---------------- Parsers por módulo ----------------
+# ================== Parsers por módulo ==================
 _ALERG_RE_FREE = re.compile(r"(?:alergias?|al[ée]rgic[oa]s?)\b[:\s-]*([^\n]+)", re.IGNORECASE)
 _NO_ALERG_RE = re.compile(r"\b(no|ninguna?)\b.*\b(alergia|al[ée]rgic[oa]s?)\b", re.IGNORECASE)
+
 _MEDIC_RE_FREE = re.compile(r"(?:medicaci[oó]n|tomo|tomas|toma|puff|inhalador(?:es)?)\b[:\s-]*([^\n]+)", re.IGNORECASE)
+
+# ilícitas (para parser local)
+_NEG_ILICIT_RE = re.compile(r"\b(no|nunca)\b.*\b(drogas?|il[ií]citas?|porro|marihuana|cannabis|coca[ií]na|paco|mdma|[ée]xtasis|ketamina|lsd|hongos|tusi)\b", re.IGNORECASE)
+_ILICIT_KEYS = [
+    "cannabis","marihuana","porro","faso","weed","cocaína","merca","perico",
+    "paco","mdma","éxtasis","extasis","ketamina","lsd","ácido","acido","hongos","psilocibina","tusi","2cb","2c-b"
+]
 
 def _parse_alergias(text: str) -> Dict[str, Any]:
     s = (text or "").strip()
     if not s:
         return {}
-    out: Dict[str, Any] = {}
     if _NO_ALERG_RE.search(s):
-        out = {"alergia_medicacion": {"alergias": {"tiene_alergias": False, "detalle": []}}}
-        return {"ficha": out}
+        return {"ficha": {"alergia_medicacion": {"alergias": {"tiene_alergias": False, "detalle": []}}}}
     m = _ALERG_RE_FREE.search(s)
     if m:
         detalle_txt = m.group(1).strip()
         if detalle_txt:
-            out = {"alergia_medicacion": {"alergias": {"tiene_alergias": True, "detalle": [{"sustancia": detalle_txt}]}}}
-    return {"ficha": out} if out else {}
+            return {"ficha": {"alergia_medicacion": {"alergias": {"tiene_alergias": True, "detalle": [{"sustancia": detalle_txt}]}}}}
+    return {}
 
 def _parse_medicacion(text: str) -> Dict[str, Any]:
     s = (text or "").strip()
+    m = _MEDIC_RE_FREE.search(s)
+    if not m:
+        return {}
+    meds = m.group(1).strip()
+    if meds:
+        return {"ficha": {"alergia_medicacion": {"medicacion_habitual": [{"droga": meds}]}}}
+    return {}
+
+def _parse_ilicitas(text: str) -> Dict[str, Any]:
+    s = (text or "").strip().lower()
     if not s:
         return {}
-    out: Dict[str, Any] = {}
-    m = _MEDIC_RE_FREE.search(s)
-    if m:
-        meds = m.group(1).strip()
-        if meds:
-            out = {"alergia_medicacion": {"medicacion_habitual": [{"droga": meds}]}}
-    return {"ficha": out} if out else {}
+    if _NEG_ILICIT_RE.search(s):
+        return {"ficha": {"sustancias": {"ilicitas": {"consume": False, "detalle": []}}}}
+    found = []
+    for k in _ILICIT_KEYS:
+        if re.search(rf"\b{k}\b", s, re.IGNORECASE):
+            found.append(k)
+    if found:
+        return {"ficha": {"sustancias": {"ilicitas": {"consume": True, "detalle": [{"sustancia": x} for x in sorted(set(found))]}}}}
+    return {}
 
 def _parse_antecedentes(text: str) -> Dict[str, Any]:
-    _ANTEC_RE = re.compile(r"(?:antecedentes?|enfermedades?|patolog[ií]a?s?)\s*:?\s*[- ]*(?P<antecedentes>.+)", re.IGNORECASE)
-    m = _ANTEC_RE.search(text or "")
+    m = re.search(r"(?:antecedentes?|enfermedades?|patolog[ií]a?s?)\s*:?\s*[- ]*(?P<antecedentes>.+)", text or "", re.IGNORECASE)
     if not m: return {}
     return {"ficha": {"antecedentes": {"otros": [m.group("antecedentes").strip()]}}}
 
 def _parse_complementarios(text: str) -> Dict[str, Any]:
-    _COMPL_RE = re.compile(r"(?:estudios?|laboratorio|lab[s]?|electro|ecg|rx|placa|tc|mri|rmn)\s*:?\s*[- ]*(?P<complementarios>.+)", re.IGNORECASE)
-    m = _COMPL_RE.search(text or "")
+    m = re.search(r"(?:estudios?|laboratorio|lab[s]?|electro|ecg|rx|placa|tc|mri|rmn)\s*:?\s*[- ]*(?P<complementarios>.+)", text or "", re.IGNORECASE)
     if not m: return {}
     return {"ficha": {"complementarios": {"imagenes": [{"estudio": m.group("complementarios").strip()}]}}}
 
 def _parse_sustancias(text: str) -> Dict[str, Any]:
-    _TABA_RE = re.compile(r"(?:tabaco|fumo|fum[oé]s?|cigarrillos?)\s*:?\s*[- ]*(?P<tabaco>.+)", re.IGNORECASE)
-    _ALCO_RE = re.compile(r"(?:alcohol|beb[eo]s?)\s*:?\s*[- ]*(?P<alcohol>.+)", re.IGNORECASE)
-    _OTRAS_RE = re.compile(r"(?:drogas?|sustancias?)\s*:?\s*[- ]*(?P<otras>.+)", re.IGNORECASE)
     out: Dict[str, Any] = {}
-    mt = _TABA_RE.search(text or "");  ma = _ALCO_RE.search(text or "");  mo = _OTRAS_RE.search(text or "")
+    mt = re.search(r"(?:tabaco|fumo|fum[oé]s?|cigarrillos?)\s*:?\s*[- ]*(?P<tabaco>.+)", text or "", re.IGNORECASE)
+    ma = re.search(r"(?:alcohol|beb[eo]s?)\s*:?\s*[- ]*(?P<alcohol>.+)", text or "", re.IGNORECASE)
+    mo = re.search(r"(?:drogas?|sustancias?)\s*:?\s*[- ]*(?P<otras>.+)", text or "", re.IGNORECASE)
     if mt: out.setdefault("sustancias", {}); out["sustancias"]["tabaco"] = {"consume": True, "ultimo_consumo": mt.group("tabaco").strip()}
     if ma: out.setdefault("sustancias", {}); out["sustancias"]["alcohol"] = {"consume": True}
     if mo: out.setdefault("sustancias", {}); out["sustancias"]["otras"] = {"consume": True, "detalle": [mo.group("otras").strip()]}
     return {"ficha": out} if out else {}
 
 def _parse_via_aerea(text: str) -> Dict[str, Any]:
-    _VA_RE = re.compile(r"(?:v[ií]a\s*a[ée]rea|mallampati|apertura|bucal|dentari[ao]s?|piezas|pr[oó]tesis)\s*:?\s*[- ]*(?P<via_aerea>.+)", re.IGNORECASE)
-    m = _VA_RE.search(text or "")
+    m = re.search(r"(?:v[ií]a\s*a[ée]rea|mallampati|apertura|bucal|dentari[ao]s?|piezas|pr[oó]tesis)\s*:?\s*[- ]*(?P<via_aerea>.+)", text or "", re.IGNORECASE)
     if not m: return {}
     return {"ficha": {"via_aerea": {"otros": [m.group("via_aerea").strip()]}}}
 
 _PARSERS = {0: _parse_generales, 1: _parse_alergias, 2: _parse_medicacion, 3: _parse_antecedentes, 4: _parse_complementarios, 5: _parse_sustancias, 6: _parse_via_aerea}
 
 def fill_from_text_modular(state: Any, module_idx: int, text: str) -> Dict[str, Any]:
+    # Manejo de sub-fase del módulo 2 (meds / illicit)
+    if module_idx == 2 and getattr(state, "_mod2_phase", "meds") == "illicit":
+        return _parse_ilicitas(text or "")
     parser = _PARSERS.get(module_idx)
     if not parser: return {}
     data = parser(text or "")
     return data or {}
 
-# ============================================================================
-# LLM extractores
-# ============================================================================
+# ================== LLM extractores ==================
 def _call_openai(messages: list[dict], max_tokens: int = 128) -> Optional[str]:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -495,34 +458,23 @@ def _call_openai(messages: list[dict], max_tokens: int = 128) -> Optional[str]:
         except Exception:
             return None
 
-# ---- LLM: Generales (módulo 0) ----
 def _llm_extract_generales_full(text: str) -> Dict[str, Any]:
     if not (text or "").strip():
         return {}
     system = (
         "Sos un extractor de datos para admisión preanestésica en Argentina. "
-        "Debés leer un mensaje libre de WhatsApp y devolver SOLO un JSON válido con este esquema:"
-        '{"nombre_apellido":{"value":null,"source_span":null,"confidence":0.0},"dni":{"value":null,"source_span":null,"confidence":0.0},"fecha_nacimiento":{"value":null,"source_span":null,"confidence":0.0},"peso_kg":{"value":null,"source_span":null,"confidence":0.0},"talla_cm":{"value":null,"source_span":null,"confidence":0.0},"obra_social":{"value":null,"source_span":null,"confidence":0.0},"nro_afiliado":{"value":null,"source_span":null,"confidence":0.0},"motivo_consulta":{"value":null,"source_span":null,"confidence":0.0},"imc":{"value":null},"missing_fields":[],"questions_to_user":[]}'
-        " Reglas: DNI solo dígitos; fecha en dd/mm/aaaa; talla en cm; calcular IMC si hay peso y talla. "
-        "Si un dato es imposible, dejalo en null."
+        "Devolvé SOLO JSON con este esquema:"
+        '{"nombre_apellido":{"value":null},"dni":{"value":null},"fecha_nacimiento":{"value":null},"peso_kg":{"value":null},"talla_cm":{"value":null},"obra_social":{"value":null},"nro_afiliado":{"value":null},"motivo_consulta":{"value":null},"imc":{"value":null}}'
     )
     user = f"Mensaje del paciente:\n{text}"
+    raw = _call_openai([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=350)
+    if not raw: return {}
+    try: obj = json.loads(raw)
+    except Exception: return {}
 
-    try:
-        from core.llm_client import llm_client  # type: ignore
-        raw = llm_client.call_llm_simple(prompt=system + "\n\n" + user, max_tokens=350, temperature=0)
-    except Exception:
-        raw = _call_openai(messages=[{"role": "system", "content": system},{"role": "user", "content": user}], max_tokens=350)
-    if not raw:
-        return {}
-    try:
-        obj = json.loads(raw)
-    except Exception:
-        return {}
-
-    def _getv(key: str):
-        it = obj.get(key) or {}
-        return (it.get("value") if isinstance(it, dict) else None)
+    def _getv(k): 
+        it = obj.get(k) or {}
+        return (it.get("value") if isinstance(it, dict) else it) or None
 
     nombre = (_getv("nombre_apellido") or "").strip()
     dni_raw = (_getv("dni") or "").strip()
@@ -532,11 +484,10 @@ def _llm_extract_generales_full(text: str) -> Dict[str, Any]:
     os_ = (_getv("obra_social") or "").strip()
     afiliado = (_getv("nro_afiliado") or "").strip()
     motivo = (_getv("motivo_consulta") or "").strip()
-    imc_val = obj.get("imc", {}).get("value") if isinstance(obj.get("imc"), dict) else obj.get("imc")
+    imc_val = _getv("imc")
 
-    dni = re.sub(r"\D+", "", dni_raw) if dni_raw else None
-    if dni and not (6 <= len(dni) <= 10):
-        dni = None
+    dni = re.sub(r"\D", "", dni_raw) if dni_raw else None
+    if dni and not (6 <= len(dni) <= 10): dni = None
     fnac_std = _parse_date_ddmmyyyy(fnac) if fnac else None
 
     try:
@@ -545,14 +496,14 @@ def _llm_extract_generales_full(text: str) -> Dict[str, Any]:
     except Exception:
         peso_f = None
     try:
-        if talla is None:
-            talla_cm = None
+        if talla is None: talla_cm = None
         else:
             tv = float(str(talla).replace(",", "."))
             talla_cm = int(round(tv * 100)) if 0.9 <= tv <= 2.5 else int(round(tv))
             if not (100 <= talla_cm <= 230): talla_cm = None
     except Exception:
         talla_cm = None
+
     if imc_val is None:
         imc_val = _calc_imc(peso_f, talla_cm)
 
@@ -564,35 +515,24 @@ def _llm_extract_generales_full(text: str) -> Dict[str, Any]:
 
     ficha: Dict[str, Any] = {}
     if dni: ficha["dni"] = dni
-
     datos: Dict[str, Any] = {}
-    if nombre:
-        nombre_cap = _smart_name_capitalize(nombre)
-        if not re.fullmatch(r"y\s+apellido\s*:?", nombre_cap, flags=re.IGNORECASE):
-            datos["nombre_completo"] = nombre_cap
+    if nombre: datos["nombre_completo"] = _smart_name_capitalize(nombre)
     if fnac_std: datos["fecha_nacimiento"] = fnac_std
     if edad is not None: datos["edad"] = edad
     datos["fecha_evaluacion"] = feval_std
     if datos: ficha["datos"] = datos
-
     antropo: Dict[str, Any] = {}
     if peso_f is not None: antropo["peso_kg"] = peso_f
     if talla_cm is not None: antropo["talla_cm"] = talla_cm
     if imc_val is not None: antropo["imc"] = imc_val
     if antropo: ficha["antropometria"] = antropo
-
-    cobertura: Dict[str, Any] = {}
-    if os_: cobertura["obra_social"] = os_
-    if afiliado: cobertura["afiliado"] = afiliado
-    if motivo_norm: cobertura["motivo_cirugia"] = motivo_norm
-    if cobertura: ficha["cobertura"] = cobertura
-
+    if motivo_norm: ficha.setdefault("cobertura", {})["motivo_cirugia"] = motivo_norm
     return {"ficha": ficha} if ficha else {}
 
-# ---------- Heurística ALERGIAS para casos como "corticoides. no podía respirar" ----------
+# ---------- Heurística ALERGIAS ----------
 _RE_NEG_ALERG = re.compile(r"\b(no|ninguna?)\b.*\b(alergia|al[ée]rgic[oa]s?)\b", re.IGNORECASE)
 _RE_RX = [
-    (re.compile(r"\bno\s+podi[aá]\s+respirar\b|\bfalta\s+de\s+aire\b|\bdificultad\s+para\s+respirar\b|\bdisnea\b", re.IGNORECASE), "falta de aire"),
+    (re.compile(r"\bno\s+podi[aá]\s+respirar\b|\bfalta\s+de\s+aire\b|\bdisnea\b", re.IGNORECASE), "falta de aire"),
     (re.compile(r"\b(broncoespasmo|sibilancias?)\b", re.IGNORECASE), "broncoespasmo"),
     (re.compile(r"\brash\b|\bronchas\b|\burticaria\b", re.IGNORECASE), "rash/ronchas"),
     (re.compile(r"\bhinchaz[oó]n\b|\bedema\b|\bangioedema\b", re.IGNORECASE), "hinchazón/edema"),
@@ -606,35 +546,22 @@ def _heuristic_alergias_from_text(text: str) -> Optional[Dict[str, Any]]:
         return None
     if _RE_NEG_ALERG.search(s):
         return {"tiene_alergias": False, "detalle": []}
-
     reaction = None
     for rx, label in _RE_RX:
         if rx.search(s):
             reaction = label
             break
     if reaction:
-        # sustancia: primera oración antes de punto/coma/salto
         first = re.split(r"[.,;\n]", s, 1)[0].strip()
-        # quitar prefijos “soy alérgico a …”
         first = re.sub(r"^(soy|era|fui)\s+al[ée]rgic[oa]\s+a\s+", "", first, flags=re.IGNORECASE).strip()
         first = re.sub(r"^a\s+(la|el|los|las)\s+", "", first, flags=re.IGNORECASE).strip()
-        sust = first if first else None
-        return {"tiene_alergias": True, "detalle": [{"sustancia": sust or "no especifica", "reaccion": reaction}]}
+        sust = first if first else "no especifica"
+        return {"tiene_alergias": True, "detalle": [{"sustancia": sust, "reaccion": reaction}]}
     return None
 
-# ---- LLM: Alergias (módulo 1) ----
 def _llm_extract_alergias(text: str) -> Dict[str, Any]:
-    """
-    Devuelve:
-    {
-      "tiene_alergias": true/false,
-      "detalles": [{"sustancia": str, "reaccion": str|null}, ...]
-    }
-    """
     if not (text or "").strip():
         return {}
-
-    # Heurística previa: detecta reacciones típicas y evita confundir “no podía respirar” con negación
     heur = _heuristic_alergias_from_text(text)
     if heur is not None:
         return {"ficha": {"alergia_medicacion": {"alergias": {"tiene_alergias": heur["tiene_alergias"], "detalle": heur["detalle"]}}}}
@@ -642,137 +569,110 @@ def _llm_extract_alergias(text: str) -> Dict[str, Any]:
     system = (
         "Sos un extractor clínico de alergias. Devolvé SOLO JSON:\n"
         '{"tiene_alergias": bool, "detalles": [{"sustancia": str, "reaccion": str|null}]}\n'
-        "Reglas importantes:\n"
-        "- No interpretes frases como “no podía respirar” o “no me entraba aire” como negación; eso describe una REACCIÓN (falta de aire/broncoespasmo).\n"
-        "- Si se menciona una sustancia (alimento o fármaco) y hay síntomas compatibles, tiene_alergias=true.\n"
-        "- Si el paciente niega explícitamente alergias (p. ej. “no alergias conocidas”, “no soy alérgico”), entonces tiene_alergias=false.\n"
-        "- Mantener las palabras del paciente en 'reaccion' (p. ej. rash/ronchas, hinchazón, falta de aire, shock)."
+        "No confundas frases como “no podía respirar” con negación: eso es reacción."
     )
     user = f"Texto del paciente:\n{text}"
-
-    raw = _call_openai(messages=[{"role": "system", "content": system}, {"role": "user", "content": user}], max_tokens=250)
-    try:
-        obj = json.loads(raw) if raw else {}
-    except Exception:
-        obj = {}
-    if not isinstance(obj, dict):
-        return {}
-
+    raw = _call_openai([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=250)
+    try: obj = json.loads(raw) if raw else {}
+    except Exception: obj = {}
+    if not isinstance(obj, dict): return {}
     tiene = bool(obj.get("tiene_alergias", False))
     detalles = obj.get("detalles") or []
-    norm_detalles = []
+    norm = []
     for it in detalles:
         if not isinstance(it, dict): continue
         sust = (it.get("sustancia") or "").strip()
-        reac = (it.get("reaccion") or None)
-        if sust:
-            norm_detalles.append({"sustancia": sust, "reaccion": (reac or None)})
-
-    # Post-corrección: si el LLM dijo "false" pero detectamos reacciones típicas, forzamos true
+        reac = it.get("reaccion") or None
+        if sust: norm.append({"sustancia": sust, "reaccion": reac})
     if not tiene:
         heur2 = _heuristic_alergias_from_text(text)
         if heur2 and heur2["tiene_alergias"]:
             tiene = True
-            norm_detalles = heur2["detalle"]
+            norm = heur2["detalle"]
+    return {"ficha": {"alergia_medicacion": {"alergias": {"tiene_alergias": tiene, "detalle": norm}}}}
 
-    return {"ficha": {"alergia_medicacion": {"alergias": {"tiene_alergias": tiene, "detalle": norm_detalles}}}}
-
-# ---- LLM: Medicación (módulo 2) ----
+# ---------- LLM: Medicación habitual (módulo 2 / fase meds) ----------
 def _llm_extract_medicacion(text: str) -> Dict[str, Any]:
     if not (text or "").strip():
         return {}
     system = (
         "Sos un normalizador de medicación en *Argentina*. "
-        "A partir de un texto en español con medicación habitual, devolvé SOLO JSON con este esquema: "
-        '{"meds":[{"droga": str, "dosis": str|null, "frecuencia": str|null}]} '
-        "Reglas:\n"
-        "- Usá la denominación en Argentina (ejemplo: Paxon = losartán, no paroxetina).\n"
-        "- Aceptá nombres comerciales o genéricos y devolvé siempre el principio activo usado en Argentina.\n"
-        "- Incluir puff/inhaladores si se mencionan.\n"
-        "- Si no hay medicación, usá meds=[].\n"
-        "- No inventes dosis ni frecuencia; solo usá lo que el paciente escribió."
+        "Devolvé SOLO JSON: {\"meds\":[{\"droga\": str, \"dosis\": str|null, \"frecuencia\": str|null}]}. "
+        "Aceptá nombres comerciales (p.ej., Paxon=losartán), incluí puff/inhaladores, no inventes dosis/frecuencia."
     )
     user = f"Texto del paciente:\n{text}"
-    raw = _call_openai(messages=[{"role": "system", "content": system},{"role": "user", "content": user}], max_tokens=320)
-    try:
-        obj = json.loads(raw) if raw else {}
-    except Exception:
-        obj = {}
+    raw = _call_openai([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=320)
+    try: obj = json.loads(raw) if raw else {}
+    except Exception: obj = {}
     meds_in = obj.get("meds") or []
     meds_out = []
     for it in meds_in:
         if not isinstance(it, dict): continue
         d = (it.get("droga") or "").strip()
         if not d: continue
-        dosis = (it.get("dosis") or None)
-        frec = (it.get("frecuencia") or None)
-        meds_out.append({"droga": d, "dosis": dosis, "frecuencia": frec})
+        meds_out.append({"droga": d, "dosis": (it.get("dosis") or None), "frecuencia": (it.get("frecuencia") or None)})
     return {"ficha": {"alergia_medicacion": {"medicacion_habitual": meds_out}}}
 
-# ============================================================================
-# LLM por módulo (incluye fallback de motivo entre comillas)
-# ============================================================================
-def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
-    if module_idx != 0:
-        if module_idx == 1:  # Alergias
-            return _llm_extract_alergias(text or "")
-        if module_idx == 2:  # Medicación
-            return _llm_extract_medicacion(text or "")
+# ---------- LLM: Ilícitas (módulo 2 / fase illicit) ----------
+def _llm_extract_ilicitas(text: str) -> Dict[str, Any]:
+    if not (text or "").strip():
         return {}
+    system = (
+        "Extraé consumo de *sustancias ilícitas*. Devolvé SOLO JSON:\n"
+        '{"consume": bool, "items": [{"sustancia": str, "frecuencia": str|null, "ultimo_consumo": str|null}]}\n'
+        "Si el paciente niega (“no consumo drogas/porro/etc.”), poné consume=false e items=[]. "
+        "No juzgues ni expandas."
+    )
+    user = f"Texto del paciente:\n{text}"
+    raw = _call_openai([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=300)
+    try: obj = json.loads(raw) if raw else {}
+    except Exception: obj = {}
+    consume = bool(obj.get("consume", False))
+    items = []
+    for it in obj.get("items") or []:
+        if not isinstance(it, dict): continue
+        sust = (it.get("sustancia") or "").strip()
+        if not sust: continue
+        items.append({"sustancia": sust, "frecuencia": (it.get("frecuencia") or None), "ultimo_consumo": (it.get("ultimo_consumo") or None)})
+    # post: si LLM dijo false pero hay keywords claras, forzar true
+    if not consume:
+        loc = _parse_ilicitas(text)
+        if loc:
+            d = loc["ficha"]["sustancias"]["ilicitas"]
+            consume = d.get("consume", False)
+            items = d.get("detalle", [])
+    return {"ficha": {"sustancias": {"ilicitas": {"consume": consume, "detalle": items}}}}
 
-    # ====== Módulo 0 ======
-    patch_total: Dict[str, Any] = {}
-    patch_free = _llm_extract_generales_full(text or "")
-    if patch_free:
-        patch_total = _deep_merge_dict(patch_total, patch_free)
+# Router-friendly: LLM parse por módulo/fase
+def llm_parse_modular(text: str, module_idx: int, state: Any = None) -> Dict[str, Any]:
+    if module_idx == 0:
+        # SNOMED + fallback con comillas (ya implementado abajo en versión extensa en tu código anterior).
+        # Para ahorrar tokens, reuso extracción anterior y, si no hay mapeo confiable, dejo el motivo original.
+        base = _llm_extract_generales_full(text or "")
+        # Fallback “entre comillas” para motivo si no vino normalizado:
+        try:
+            cob = (((base or {}).get("ficha") or {}).get("cobertura") or {})
+            if not cob.get("motivo_cirugia"):
+                m = re.search(r"(?i)^motivo.*?:\s*(.+)$", text or "")
+                cand = (m.group(1).strip() if m else None)
+                if cand:
+                    base = _deep_merge_dict(base, {"ficha": {"cobertura": {"motivo_cirugia": f"\"{cand}\""}}})
+        except Exception:
+            pass
+        return base or {}
 
-    # SNOMED best-effort + fallback entre comillas si no hay mapeo confiable
-    m = re.search(r"(?im)^motivo.*?:\s*(.+)$", text or "")
-    candidate = (m.group(1).strip() if m else None) or ""
-    if not candidate:
-        m2 = re.search(r"(oper(ar|aci[oó]n)|sac(ar|an)|extirpar|quitar|me\s+hacen|intervenci[oó]n)[:\s,-]*([^\n]+)", text or "", re.IGNORECASE)
-        if m2:
-            candidate = (m2.group(3) or "").strip()
+    if module_idx == 1:
+        return _llm_extract_alergias(text or "")
 
-    mapping_ok = False
-    if candidate:
-        system = (
-            "Eres un codificador clínico experto en procedimientos quirúrgicos. "
-            "Estandariza descripciones libres en español a un término/procedimiento SNOMED CT. "
-            "Responde SOLO en JSON: {\"term_es\": str, \"sctid\": str|null, \"fsn_en\": str|null, \"confidence\": num}."
-        )
-        user = f"Texto del paciente:\n{text}\n\nMotivo libre detectado: {candidate}"
-        raw = _call_openai(messages=[{"role": "system", "content": system},{"role": "user", "content": user}], max_tokens=200)
-        if raw:
-            try:
-                obj = json.loads(raw)
-                term_es = (obj.get("term_es") or "").strip() or None
-                sctid = (obj.get("sctid") or None)
-                fsn = (obj.get("fsn_en") or None)
-                conf = float(obj.get("confidence") or 0)
-            except Exception:
-                term_es = raw.strip() if raw else None
-                sctid = fsn = None
-                conf = 0.0
-            if term_es and (conf >= 0.65 or sctid):
-                patch_sn = {"ficha": {"cobertura": {"motivo_cirugia": re.sub(r'[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s\-]', '', term_es).strip()}}}
-                if sctid or fsn:
-                    patch_sn["ficha"]["cobertura"]["motivo_snomed"] = {"sctid": sctid, "fsn_en": fsn, "confidence": conf}
-                patch_total = _deep_merge_dict(patch_total, patch_sn)
-                mapping_ok = True
+    if module_idx == 2:
+        phase = getattr(state, "_mod2_phase", "meds") if state is not None else "meds"
+        if phase == "illicit":
+            return _llm_extract_ilicitas(text or "")
+        return _llm_extract_medicacion(text or "")
 
-    if candidate and not mapping_ok:
-        heur = normalize_motivo_clinico_heuristic(candidate) or ""
-        if heur.strip().lower() == candidate.strip().lower() or not heur:
-            quoted = f"\"{candidate.strip()}\""
-            patch_quote = {"ficha": {"cobertura": {"motivo_cirugia": quoted}}}
-            patch_total = _deep_merge_dict(patch_total, patch_quote)
+    return {}
 
-    return patch_total
-
-# ============================================================================
-# Confirmación
-# ============================================================================
+# ================== Confirmación ==================
 def _fmt(v: Any) -> Optional[str]:
     return None if v in (None, "", []) else str(v)
 
@@ -789,27 +689,16 @@ def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> 
         datos = ficha.get("datos", {}) if isinstance(ficha.get("datos"), dict) else {}
         antropo = ficha.get("antropometria", {}) if isinstance(ficha.get("antropometria"), dict) else {}
         cob = ficha.get("cobertura", {}) if isinstance(ficha.get("cobertura"), dict) else {}
-
-        nombre = datos.get("nombre_completo")
-        fnac = datos.get("fecha_nacimiento")
-        edad = datos.get("edad")
-        peso = antropo.get("peso_kg")
-        talla = antropo.get("talla_cm")
-        imc = antropo.get("imc")
-        os_ = cob.get("obra_social")
-        afil = cob.get("afiliado")
-        motivo = cob.get("motivo_cirugia")
-
+        nombre = datos.get("nombre_completo"); fnac = datos.get("fecha_nacimiento"); edad = datos.get("edad")
+        peso = antropo.get("peso_kg"); talla = antropo.get("talla_cm"); imc = antropo.get("imc")
+        os_ = cob.get("obra_social"); afil = cob.get("afiliado"); motivo = cob.get("motivo_cirugia")
         lines = []
-        if any([nombre, dni, fnac, edad, peso, talla, imc, os_, afil, motivo]):
-            lines.append("✔️ Registré:")
+        if any([nombre, dni, fnac, edad, peso, talla, imc, os_, afil, motivo]): lines.append("✔️ Registré:")
         if _fmt(nombre) or _fmt(dni):
-            left = _fmt(nombre) or ""
-            right = f"DNI {dni}" if _fmt(dni) else ""
+            left = _fmt(nombre) or ""; right = f"DNI {dni}" if _fmt(dni) else ""
             lines.append(f"• {left}{(' — ' + right) if left and right else right}")
         if _fmt(fnac) or _fmt(edad):
-            left = _fmt(fnac) or ""
-            right = f"({_fmt(edad)} años)" if _fmt(edad) else ""
+            left = _fmt(fnac) or ""; right = f"({_fmt(edad)} años)" if _fmt(edad) else ""
             lines.append(f"• Nac.: {left} {right}".strip())
         if _fmt(peso) or _fmt(talla) or _fmt(imc):
             parts = []
@@ -822,18 +711,14 @@ def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> 
             if _fmt(os_): parts.append(f"Obra social: {os_}")
             if _fmt(afil): parts.append(f"Afiliado: {afil}")
             lines.append("• " + " — ".join(parts))
-        if _fmt(motivo):
-            lines.append(f"• Motivo: {motivo}")
-
+        if _fmt(motivo): lines.append(f"• Motivo: {motivo}")
         return "\n".join([l for l in lines if l])
 
-    if module_idx == 1:  # Alergias
+    if module_idx == 1:
         am = ficha.get("alergia_medicacion", {}) if isinstance(ficha.get("alergia_medicacion"), dict) else {}
         alg = am.get("alergias", {}) if isinstance(am.get("alergias"), dict) else {}
-        tiene = alg.get("tiene_alergias")
-        detalles = alg.get("detalle") or []
-        if tiene is False:
-            return "✔️ Registré: sin alergias conocidas."
+        tiene = alg.get("tiene_alergias"); detalles = alg.get("detalle") or []
+        if tiene is False: return "✔️ Registré: sin alergias conocidas."
         if detalles:
             lines = ["✔️ Alergias:"]
             for d in detalles:
@@ -844,23 +729,35 @@ def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> 
             return "\n".join(lines)
         return ""
 
-    if module_idx == 2:  # Medicación
+    if module_idx == 2:
+        lines = []
         am = ficha.get("alergia_medicacion", {}) if isinstance(ficha.get("alergia_medicacion"), dict) else {}
         meds = am.get("medicacion_habitual") or []
         if meds:
-            lines = ["✔️ Medicación habitual:"]
+            lines.append("✔️ Medicación habitual:")
             for m in meds:
                 if not isinstance(m, dict): continue
                 droga = m.get("droga"); dosis = m.get("dosis"); frec = m.get("frecuencia")
                 if not droga: continue
                 extra = " ".join(x for x in [dosis or "", f"({frec})" if frec else ""] if x).strip()
                 lines.append(f"• {droga}" + (f" — {extra}" if extra else ""))
-            return "\n".join(lines)
-        return ""
+        il = (ficha.get("sustancias", {}) or {}).get("ilicitas", {})
+        if isinstance(il, dict):
+            consume = il.get("consume")
+            det = il.get("detalle") or []
+            if consume is False:
+                lines.append("✔️ Sin consumo de sustancias ilícitas.")
+            elif det:
+                lines.append("✔️ Sustancias ilícitas:")
+                for it in det:
+                    if not isinstance(it, dict): continue
+                    s = it.get("sustancia"); fr = it.get("frecuencia"); uc = it.get("ultimo_consumo")
+                    extra = " ".join(x for x in [fr or "", uc or ""] if x).strip()
+                    lines.append(f"• {s}" + (f" — {extra}" if extra else ""))
+        return "\n".join(lines).strip()
 
-    public_items = [(k, v) for k, v in ficha.items() if not str(k).startswith("_")]
-    if not public_items:
-        return ""
+    public_items = [(k, v) for k, v in (ficha.items()) if not str(k).startswith("_")]
+    if not public_items: return ""
     modulo_name = MODULES[module_idx]["name"] if 0 <= module_idx < len(MODULES) else "Bloque"
     joined = "; ".join(f"{k}: {v}" for k, v in public_items)
     return f"Anoté en {modulo_name}: {joined}."

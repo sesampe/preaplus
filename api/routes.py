@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 from typing import Dict, Any, Tuple, Optional
 from datetime import datetime
 import os
-import httpx  # envío RAW a Graph API para listas
+import httpx
 
 from core.settings import HEYOO_PHONE_ID, HEYOO_TOKEN
 from heyoo import WhatsApp
@@ -16,17 +16,14 @@ from core.steps import (
     merge_state,
     summarize_patch_for_confirmation,
     MODULES,
+    PROMPT_ILICITAS_M2,   # ← nuevo: prompt de ilícitas (módulo 2, fase 2)
 )
 
 router = APIRouter()
 wa_client = WhatsApp(token=HEYOO_TOKEN, phone_number_id=HEYOO_PHONE_ID)
-
 GRAPH_VERSION = os.getenv("WA_GRAPH_VERSION", "v20.0")
-
-# Número de prueba (ajustá al tuyo)
 HARDCODED_USER_ID = "542616463629"
 
-# ====== Memoria simple en-proc ======
 _USER_STATE: Dict[str, ConversationState] = {}
 
 def load_state(user_id: str) -> ConversationState:
@@ -38,6 +35,8 @@ def load_state(user_id: str) -> ConversationState:
         st._last_failed_module = None
         st._has_greeted = False
         st.module_idx = 0
+        # Fase interna del módulo 2: 'meds' → 'illicit'
+        st._mod2_phase = "meds"
         _USER_STATE[user_id] = st
     # compat
     if not hasattr(st, "_handled_msg_ids"): st._handled_msg_ids = set()
@@ -45,23 +44,21 @@ def load_state(user_id: str) -> ConversationState:
     if not hasattr(st, "_last_failed_module"): st._last_failed_module = None
     if not hasattr(st, "_has_greeted"): st._has_greeted = False
     if not hasattr(st, "module_idx") or st.module_idx is None: st.module_idx = 0
+    if not hasattr(st, "_mod2_phase"): st._mod2_phase = "meds"
     return st
 
 def save_state(state: ConversationState):
     state.updated_at = datetime.utcnow()
     _USER_STATE[state.user_id] = state
 
-# ====== Helpers ======
+# ------------------- helpers -------------------
 def _extract_incoming(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
-    """Devuelve (text, message_id) o ('__IGNORE__', None) si es status/otro tipo.
-    Soporta text e interactive.button_reply / interactive.list_reply.
-    """
     try:
         entry = payload.get("entry", [])[0]
         change = entry.get("changes", [])[0]
         value = change.get("value", {})
 
-        if value.get("statuses"):  # callbacks de delivery/read
+        if value.get("statuses"):
             return "__IGNORE__", None
 
         msgs = value.get("messages") or []
@@ -76,11 +73,9 @@ def _extract_incoming(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
 
             if msg_type == "interactive":
                 it = msg.get("interactive", {}) or {}
-                # Button
                 if it.get("type") == "button_reply":
                     br = it.get("button_reply", {}) or {}
                     return (br.get("id") or br.get("title") or "").strip(), msg_id
-                # List
                 if it.get("type") == "list_reply":
                     lr = it.get("list_reply", {}) or {}
                     return (lr.get("id") or lr.get("title") or "").strip(), msg_id
@@ -89,7 +84,6 @@ def _extract_incoming(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     except Exception:
         pass
 
-    # modo test local
     text = payload.get("text") or payload.get("message") or payload.get("body") or ""
     mid = payload.get("message_id")
     if not text:
@@ -107,21 +101,16 @@ def _dig(obj: Any, path: list[str]) -> Any:
 def _to_dict(obj: Any) -> Any:
     if isinstance(obj, dict):
         return {k: _to_dict(v) for k, v in obj.items()}
-    if hasattr(obj, "model_dump"):  # pydantic v2
-        return obj.model_dump()
-    if hasattr(obj, "dict"):  # pydantic v1
-        return obj.dict()
-    if hasattr(obj, "__dict__"):
-        return {k: _to_dict(v) for k, v in vars(obj).items()}
-    if isinstance(obj, (list, tuple)):
-        return [_to_dict(x) for x in obj]
+    if hasattr(obj, "model_dump"): return obj.model_dump()
+    if hasattr(obj, "dict"): return obj.dict()
+    if hasattr(obj, "__dict__"): return {k: _to_dict(v) for k, v in vars(obj).items()}
+    if isinstance(obj, (list, tuple)): return [_to_dict(x) for x in obj]
     return obj
 
 def _has(v):
     return v not in (None, "", [], {})
 
 def _missing_mod0_required(state) -> list[str]:
-    """Valida obligatorios del módulo 0 en el estado actual."""
     missing = []
     if not _has(_dig(state, ["ficha", "dni"])): missing.append("DNI (solo números)")
     if not _has(_dig(state, ["ficha", "datos", "nombre_completo"])): missing.append("Nombre y apellido")
@@ -134,7 +123,6 @@ def _missing_mod0_required(state) -> list[str]:
     return missing
 
 def _missing_form_snippet(missing: list[str]) -> str:
-    """Snippet de solo los campos faltantes en negrita (WhatsApp: *texto*)."""
     mapping = {
         "Nombre y apellido": "*Nombre y apellido:*",
         "DNI (solo números)": "*DNI (solo números):*",
@@ -145,8 +133,7 @@ def _missing_form_snippet(missing: list[str]) -> str:
         "N° afiliado": "*N° afiliado:*",
         "Motivo de consulta": "*Motivo de consulta (breve):*",
     }
-    lines = [mapping[m] for m in missing if m in mapping]
-    return "\n".join(lines)
+    return "\n".join(mapping[m] for m in missing if m in mapping)
 
 def _count_core_fields_in_patch(preview: Dict[str, Any]) -> int:
     p = preview.get("ficha", {}) if isinstance(preview, dict) else {}
@@ -161,21 +148,13 @@ def _count_core_fields_in_patch(preview: Dict[str, Any]) -> int:
     if _has(_dig(p, ["cobertura", "motivo_cirugia"])): c += 1
     return c
 
-# ====== UI IDs fijos para lista de Alergias ======
+# ====== LISTA Alergias (igual que antes) ======
 ALG_LIST_NO_ID = "ALG_NO"
 ALG_LIST_SI_ID = "ALG_SI"
 
-# ====== UI Helper: LISTA interactiva (RAW Graph API) ======
 def _send_alergias_list(user_id: str) -> bool:
-    """
-    Envía una LISTA interactiva nativa de WhatsApp con dos opciones.
-    Sin footer ni descriptions (para que el chat del usuario no muestre texto extra).
-    """
     url = f"https://graph.facebook.com/{GRAPH_VERSION}/{HEYOO_PHONE_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {HEYOO_TOKEN}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {HEYOO_TOKEN}", "Content-Type": "application/json"}
     payload = {
         "messaging_product": "whatsapp",
         "to": user_id,
@@ -187,27 +166,21 @@ def _send_alergias_list(user_id: str) -> bool:
             "action": {
                 "button": "Elegir opción",
                 "sections": [
-                    {
-                        "title": "Opciones",
-                        "rows": [
-                            {"id": ALG_LIST_NO_ID, "title": "No, sin alergias"},
-                            {"id": ALG_LIST_SI_ID, "title": "Sí, tengo alergias"},
-                        ],
-                    }
+                    {"title": "Opciones", "rows": [
+                        {"id": ALG_LIST_NO_ID, "title": "No, sin alergias"},
+                        {"id": ALG_LIST_SI_ID, "title": "Sí, tengo alergias"},
+                    ]}
                 ],
             },
         },
     }
-
     try:
         with httpx.Client(timeout=10.0) as client:
-            resp = client.post(url, headers=headers, json=payload)
-            if resp.status_code // 100 == 2:
-                return True
+            r = client.post(url, headers=headers, json=payload)
+            if r.status_code // 100 == 2: return True
     except Exception:
         pass
-
-    # Fallback: botón interactivo (RAW)
+    # Fallback a botones
     payload_btn = {
         "messaging_product": "whatsapp",
         "to": user_id,
@@ -216,79 +189,84 @@ def _send_alergias_list(user_id: str) -> bool:
             "type": "button",
             "header": {"type": "text", "text": "ALERGIAS"},
             "body": {"text": "¿Sos alérgico a alguna medicación o comida?"},
-            "action": {
-                "buttons": [
-                    {"type": "reply", "reply": {"id": ALG_LIST_NO_ID, "title": "No, sin alergias"}},
-                    {"type": "reply", "reply": {"id": ALG_LIST_SI_ID, "title": "Sí, tengo alergias"}},
-                ]
-            },
+            "action": {"buttons": [
+                {"type": "reply", "reply": {"id": ALG_LIST_NO_ID, "title": "No, sin alergias"}},
+                {"type": "reply", "reply": {"id": ALG_LIST_SI_ID, "title": "Sí, tengo alergias"}},
+            ]},
         },
     }
     try:
         with httpx.Client(timeout=10.0) as client:
-            resp = client.post(url, headers=headers, json=payload_btn)
-            if resp.status_code // 100 == 2:
-                return True
+            r = client.post(url, headers=headers, json=payload_btn)
+            if r.status_code // 100 == 2: return True
     except Exception:
         pass
-
-    # Último recurso: texto plano
     try:
         wa_client.send_message(
             message="¿Sos alérgico a alguna medicación o comida?\nRespondé 1) No, sin alergias  ó  2) Sí, tengo alergias",
             recipient_id=user_id,
-        )
-        return False
+        ); return False
     except Exception:
         return False
 
-# ====== Core TRIAGE ======
+# ------------------- TRIAGE -------------------
 def _triage_block(state: ConversationState, text: str) -> Tuple[list[str], ConversationState]:
     module_idx = state.module_idx
 
-    # 1) Patch local (regex/fallbacks)
+    # Patch local
     patch_local = fill_from_text_modular(state, module_idx, text or "")
     if patch_local:
         state = merge_state(state, {"ficha": patch_local.get("ficha", patch_local)})
 
-    # 2) Patch LLM (si el módulo lo usa)
+    # Patch LLM (pasamos state para decidir fase en módulo 2)
     patch_llm: Dict[str, Any] = {}
     if 0 <= module_idx < len(MODULES) and MODULES[module_idx].get("use_llm"):
-        patch_llm = llm_parse_modular(text or "", module_idx) or {}
+        patch_llm = llm_parse_modular(text or "", module_idx, state) or {}
         if patch_llm:
             state = merge_state(state, {"ficha": patch_llm.get("ficha", patch_llm)})
 
-    # 3) Confirmación
+    # Confirmación
     snapshot = {"ficha": _to_dict(getattr(state, "ficha", {}))}
     confirm = summarize_patch_for_confirmation(snapshot, module_idx)
 
-    # 4) Faltantes (solo módulo 0)
     messages: list[str] = []
+
+    # Reglas especiales para Módulo 2 (dos preguntas)
+    if module_idx == 2:
+        if getattr(state, "_mod2_phase", "meds") == "meds":
+            # terminamos la parte de medicación: pedimos ilícitas, no avanzamos
+            if confirm:
+                messages.append(confirm)
+            messages.append(PROMPT_ILICITAS_M2)
+            state._mod2_phase = "illicit"
+            state._last_failed_module = None
+            return messages, state
+        else:
+            # estábamos en ilícitas → volvemos a 'meds' y avanzamos de módulo
+            state._mod2_phase = "meds"
+
+    # Validaciones módulo 0
     if module_idx == 0:
         faltan = _missing_mod0_required(state)
         if faltan:
-            if confirm:
-                messages.append(confirm)
+            if confirm: messages.append(confirm)
             messages.append("Me faltó completar estos campos. Copiá y pegá este mini-formulario y rellenalo:")
             messages.append(_missing_form_snippet(faltan))
             state._last_failed_module = module_idx
             return messages, state
 
-    # Avanzar
+    # Avanzar módulo normal
     state.module_idx = min(state.module_idx + 1, len(MODULES) - 1)
     state._last_failed_module = None
-
     next_idx, next_prompt = advance_module(state)
     if next_idx is None:
         messages.append(f"{confirm} ¡Listo! Completamos todos los bloques." if confirm else "¡Listo! Completamos todos los bloques.")
     else:
-        if confirm:
-            messages.append(confirm)
+        if confirm: messages.append(confirm)
         messages.append(next_prompt)
-
     return messages, state
 
-# ====== HTTP ======
+# ------------------- HTTP -------------------
 @router.post("/webhook")
 async def webhook(req: Request):
     payload = await req.json()
@@ -300,117 +278,73 @@ async def webhook(req: Request):
     user_id = HARDCODED_USER_ID
     state = load_state(user_id)
 
-    # Desduplicación
     if message_id and message_id in state._handled_msg_ids:
         return JSONResponse({"ok": True, "ignored": "duplicate_message"})
     if message_id:
         state._handled_msg_ids.add(message_id)
 
-    # PRIMER CONTACTO
     if not state._has_greeted:
         saludo = "Hola, vamos a completar tu ficha anestesiologica."
         try: wa_client.send_message(message=saludo, recipient_id=user_id)
         except Exception: pass
-
         state._has_greeted = True
         save_state(state)
 
         preview = fill_from_text_modular(state, state.module_idx, text or "") or {}
         count = _count_core_fields_in_patch(preview)
-
         if count < 3:
             try:
-                wa_client.send_message(
-                    message="COPIA, PEGA Y RELLENA CON TUS DATOS EL SIGUIENTE FORMULARIO",
-                    recipient_id=user_id,
-                )
-                wa_client.send_message(message=MODULES[0]['prompt'], recipient_id=user_id)
+                wa_client.send_message(message="COPIA, PEGA Y RELLENA CON TUS DATOS EL SIGUIENTE FORMULARIO", recipient_id=user_id)
+                wa_client.send_message(message=MODULES[0]["prompt"], recipient_id=user_id)
             except Exception:
                 pass
-            return JSONResponse({
-                "to": user_id,
-                "echo_text": text,
-                "replies": [saludo, "COPIA, PEGA Y RELLENA CON TUS DATOS EL SIGUIENTE FORMULARIO", MODULES[0]["prompt"]],
-                "sent": [True, True, True],
-                "module": MODULES[state.module_idx]["name"],
-            })
+            return JSONResponse({"to": user_id, "echo_text": text, "replies": [saludo, "COPIA, PEGA Y RELLENA CON TUS DATOS EL SIGUIENTE FORMULARIO", MODULES[0]["prompt"]], "sent": [True, True, True], "module": MODULES[state.module_idx]["name"]})
 
-    # ------ Acciones de LISTA Alergias ------
-    if text in (ALG_LIST_NO_ID,) and state.module_idx == 1:
-        # Marcar sin alergias
+    # Acciones de lista Alergias
+    if text in ("ALG_NO",) and state.module_idx == 1:
         patch = {"ficha": {"alergia_medicacion": {"alergias": {"tiene_alergias": False, "detalle": []}}}}
         state = merge_state(state, patch)
         snapshot = {"ficha": _to_dict(getattr(state, "ficha", {}))}
         confirm = summarize_patch_for_confirmation(snapshot, 1)
-        # Avanzamos a Medicación (módulo 2)
         state.module_idx = 2
+        state._mod2_phase = "meds"
         save_state(state)
-
         sent = []
         try:
-            if confirm:
-                wa_client.send_message(message=confirm, recipient_id=user_id)
+            if confirm: wa_client.send_message(message=confirm, recipient_id=user_id)
             wa_client.send_message(message=MODULES[2]["prompt"], recipient_id=user_id)
             sent = [bool(confirm), True]
         except Exception:
             pass
-        return JSONResponse({
-            "to": user_id,
-            "echo_text": text,
-            "replies": [confirm, MODULES[2]["prompt"]],
-            "sent": sent,
-            "module": MODULES[state.module_idx]["name"] if 0 <= state.module_idx < len(MODULES) else None,
-        })
+        return JSONResponse({"to": user_id, "echo_text": text, "replies": [confirm, MODULES[2]["prompt"]], "sent": sent, "module": MODULES[state.module_idx]["name"]})
 
-    if text in (ALG_LIST_SI_ID,) and state.module_idx == 1:
+    if text in ("ALG_SI",) and state.module_idx == 1:
         q = "Contame *a qué* sos alérgico y *qué te pasó* (ej: rash/ronchas, hinchazón, falta de aire, shock)."
-        try:
-            wa_client.send_message(message=q, recipient_id=user_id)
-        except Exception:
-            pass
-        state._last_failed_module = state.module_idx  # seguimos en módulo 1 esperando detalle
+        try: wa_client.send_message(message=q, recipient_id=user_id)
+        except Exception: pass
+        state._last_failed_module = state.module_idx
         save_state(state)
-        return JSONResponse({
-            "to": user_id,
-            "echo_text": text,
-            "replies": [q],
-            "sent": [True],
-            "module": MODULES[state.module_idx]["name"] if 0 <= state.module_idx < len(MODULES) else None,
-        })
+        return JSONResponse({"to": user_id, "echo_text": text, "replies": [q], "sent": [True], "module": MODULES[state.module_idx]["name"]})
 
-    # Anti-bucle
     if text == state._last_text and state._last_failed_module == state.module_idx:
         return JSONResponse({"ok": True, "ignored": "same_text_same_module"})
 
-    # Triage normal
     messages, state = _triage_block(state, text)
     save_state(state)
     state._last_text = text
 
     sent = []
     for msg in (messages or []):
-        if not msg:
-            continue
-
-        # Si vamos a pedir Alergias, usamos LISTA interactiva en lugar del prompt plano
+        if not msg: continue
         if state.module_idx == 1 and msg == MODULES[1]["prompt"]:
-            ok = _send_alergias_list(user_id)
-            sent.append(ok)
-            continue
-
+            ok = _send_alergias_list(user_id); sent.append(ok); continue
         try:
             wa_client.send_message(message=msg, recipient_id=user_id)
             sent.append(True)
         except Exception:
             sent.append(False)
 
-    return JSONResponse({
-        "to": user_id,
-        "echo_text": text,
-        "replies": messages,
-        "sent": sent,
-        "module": MODULES[state.module_idx]["name"] if 0 <= state.module_idx < len(MODULES) else None,
-    })
+    return JSONResponse({"to": user_id, "echo_text": text, "replies": messages, "sent": sent, "module": MODULES[state.module_idx]["name"] if 0 <= state.module_idx < len(MODULES) else None})
 
 @router.get("/health")
 def health():
