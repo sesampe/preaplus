@@ -746,7 +746,6 @@ def _llm_extract_medicacion(text: str) -> Dict[str, Any]:
     """
     if not (text or "").strip():
         return {}
-
     system = (
         "Sos un normalizador de medicación en *Argentina*. "
         "A partir de un texto en español con medicación habitual, devolvé SOLO JSON con este esquema: "
@@ -759,7 +758,6 @@ def _llm_extract_medicacion(text: str) -> Dict[str, Any]:
         "- No inventes dosis ni frecuencia; solo usá lo que el paciente escribió."
     )
     user = f"Texto del paciente:\n{text}"
-
     raw = _call_openai(
         messages=[{"role": "system", "content": system},
                   {"role": "user", "content": user}],
@@ -781,79 +779,89 @@ def _llm_extract_medicacion(text: str) -> Dict[str, Any]:
         dosis = (it.get("dosis") or None)
         frec = (it.get("frecuencia") or None)
         meds_out.append({"droga": d, "dosis": dosis, "frecuencia": frec})
-
     return {"ficha": {"alergia_medicacion": {"medicacion_habitual": meds_out}}}
 
-
 # ============================================================================
-# LLM: normalización por módulo
+# LLM: normalización por módulo (con fallback de motivo entre comillas)
 # ============================================================================
 def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
-    if module_idx == 0:
-        patch_total: Dict[str, Any] = {}
+    if module_idx != 0:
+        if module_idx == 1:  # Alergias
+            return _llm_extract_alergias(text or "")
+        if module_idx == 2:  # Medicación habitual
+            return _llm_extract_medicacion(text or "")
+        return {}
 
-        patch_free = _llm_extract_generales_full(text or "")
-        if patch_free:
-            patch_total = _deep_merge_dict(patch_total, patch_free)
+    # ====== Módulo 0 (Datos generales) ======
+    patch_total: Dict[str, Any] = {}
 
-        # Normalización SNOMED opcional (best-effort)
-        m = re.search(r"(?im)^motivo.*?:\s*(.+)$", text or "")
-        candidate = (m.group(1).strip() if m else None) or ""
-        if not candidate:
-            m2 = re.search(
-                r"(oper(ar|aci[oó]n)|sac(ar|an)|extirpar|quitar|me\s+hacen|intervenci[oó]n)[:\s,-]*([^\n]+)",
-                text or "", re.IGNORECASE)
-            if m2:
-                candidate = (m2.group(4) or "").strip()
+    # 1) Extracción libre de generales (nombre/dni/etc) + motivo heurístico si aplica
+    patch_free = _llm_extract_generales_full(text or "")
+    if patch_free:
+        patch_total = _deep_merge_dict(patch_total, patch_free)
 
-        if candidate:
-            system = (
-                "Eres un codificador clínico experto en procedimientos quirúrgicos. "
-                "Estandariza descripciones libres en español a un término/procedimiento SNOMED CT. "
-                "Responde SOLO en JSON: {\"term_es\": str, \"sctid\": str|null, \"fsn_en\": str|null, \"confidence\": num}."
-            )
-            user = (
-                "Texto del paciente (español):\n"
-                f"{text}\n\n"
-                f"Motivo libre detectado: {candidate}"
-            )
-            raw = _call_openai(
-                messages=[{"role": "system", "content": system},
-                          {"role": "user", "content": user}],
-                max_tokens=200,
-            )
-            if raw:
-                try:
-                    obj = json.loads(raw)
-                    term_es = (obj.get("term_es") or "").strip() or None
-                    sctid = (obj.get("sctid") or None)
-                    fsn = (obj.get("fsn_en") or None)
-                    conf = float(obj.get("confidence") or 0)
-                except Exception:
-                    term_es = raw.strip() if raw else None
-                    sctid = fsn = None
-                    conf = 0.0
+    # 2) Intento de normalizar MOTIVO vía LLM (SNOMED best-effort)
+    #    Guardamos candidate (lo que dijo el paciente) para fallback con comillas.
+    m = re.search(r"(?im)^motivo.*?:\s*(.+)$", text or "")
+    candidate = (m.group(1).strip() if m else None) or ""
+    if not candidate:
+        m2 = re.search(
+            r"(oper(ar|aci[oó]n)|sac(ar|an)|extirpar|quitar|me\s+hacen|intervenci[oó]n)[:\s,-]*([^\n]+)",
+            text or "", re.IGNORECASE)
+        if m2:
+            candidate = (m2.group(3) or "").strip()
 
-                if term_es:
-                    term_es = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s\-]", "", term_es).strip()
-                    patch_sn = {}
-                    if conf >= 0.65 or sctid:
-                        patch_sn = {"ficha": {"cobertura": {"motivo_cirugia": term_es}}}
-                    if sctid or fsn:
-                        patch_sn.setdefault("ficha", {}).setdefault("cobertura", {})["motivo_snomed"] = {
-                            "sctid": sctid, "fsn_en": fsn, "confidence": conf
-                        }
-                    patch_total = _deep_merge_dict(patch_total, patch_sn)
+    mapping_ok = False
+    if candidate:
+        system = (
+            "Eres un codificador clínico experto en procedimientos quirúrgicos. "
+            "Estandariza descripciones libres en español a un término/procedimiento SNOMED CT. "
+            "Responde SOLO en JSON: {\"term_es\": str, \"sctid\": str|null, \"fsn_en\": str|null, \"confidence\": num}."
+        )
+        user = (
+            "Texto del paciente (español):\n"
+            f"{text}\n\n"
+            f"Motivo libre detectado: {candidate}"
+        )
+        raw = _call_openai(
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": user}],
+            max_tokens=200,
+        )
+        if raw:
+            try:
+                obj = json.loads(raw)
+                term_es = (obj.get("term_es") or "").strip() or None
+                sctid = (obj.get("sctid") or None)
+                fsn = (obj.get("fsn_en") or None)
+                conf = float(obj.get("confidence") or 0)
+            except Exception:
+                term_es = raw.strip() if raw else None
+                sctid = fsn = None
+                conf = 0.0
 
-        return patch_total
+            if term_es and (conf >= 0.65 or sctid):
+                patch_sn = {"ficha": {"cobertura": {"motivo_cirugia": re.sub(r'[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s\-]', '', term_es).strip()}}}
+                if sctid or fsn:
+                    patch_sn["ficha"]["cobertura"]["motivo_snomed"] = {
+                        "sctid": sctid, "fsn_en": fsn, "confidence": conf
+                    }
+                patch_total = _deep_merge_dict(patch_total, patch_sn)
+                mapping_ok = True
 
-    if module_idx == 1:  # Alergias
-        return _llm_extract_alergias(text or "")
+    # 3) Fallback ELEGANTE: si el LLM no pudo normalizar y la heurística tampoco mejoró,
+    #    dejar el texto del paciente ENTRE COMILLAS.
+    if candidate and not mapping_ok:
+        heur = normalize_motivo_clinico_heuristic(candidate) or ""
+        cand_low = candidate.strip().lower()
+        heur_low = heur.strip().lower()
+        # Si la heurística no agrega semántica (solo capitaliza), usamos comillas
+        if heur_low == cand_low or not heur:
+            quoted = f"\"{candidate.strip()}\""
+            patch_quote = {"ficha": {"cobertura": {"motivo_cirugia": quoted}}}
+            patch_total = _deep_merge_dict(patch_total, patch_quote)
 
-    if module_idx == 2:  # Medicación habitual
-        return _llm_extract_medicacion(text or "")
-
-    return {}
+    return patch_total
 
 # ============================================================================
 # Confirmación (solo campos presentes)

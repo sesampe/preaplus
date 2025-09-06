@@ -48,7 +48,6 @@ def save_state(state: ConversationState):
     _USER_STATE[state.user_id] = state
 
 # ====== Helpers ======
-
 def _extract_incoming(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """Devuelve (text, message_id) o ('__IGNORE__', None) si es status/otro tipo.
     Soporta text e interactive.button_reply / interactive.list_reply.
@@ -76,14 +75,12 @@ def _extract_incoming(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
                 # Button
                 if it.get("type") == "button_reply":
                     br = it.get("button_reply", {}) or {}
-                    # Usamos el 'id' como payload estable; el 'title' es visible para usuario.
                     return (br.get("id") or br.get("title") or "").strip(), msg_id
                 # List
                 if it.get("type") == "list_reply":
                     lr = it.get("list_reply", {}) or {}
                     return (lr.get("id") or lr.get("title") or "").strip(), msg_id
 
-            # otros tipos no los procesamos
             return "__IGNORE__", msg_id
     except Exception:
         pass
@@ -163,49 +160,79 @@ def _count_core_fields_in_patch(preview: Dict[str, Any]) -> int:
     if _has(_dig(p, ["cobertura", "motivo_cirugia"])): c += 1
     return c
 
-# ====== UI Helpers: botones interactivos ======
-ALG_BTN_NO_ID = "ALG_NO"  # payload estable
-ALG_BTN_SI_ID = "ALG_SI"
+# ====== UI IDs fijos para lista de Alergias ======
+ALG_LIST_NO_ID = "ALG_NO"
+ALG_LIST_SI_ID = "ALG_SI"
 
+# ====== UI Helper: LISTA interactiva ======
 def _send_alergias_list(user_id: str) -> bool:
     """
-    Envía una LISTA interactiva con dos opciones:
-      - No, sin alergias
-      - Sí, tengo alergias
-    Al tocar el botón, se despliega la lista (UX nativa de WhatsApp).
+    Envía una LISTA interactiva nativa de WhatsApp con dos opciones.
+    Intenta distintas firmas de heyoo para ser compatible con versiones.
     """
+    sections = [
+        {
+            "title": "Opciones",
+            "rows": [
+                {"id": ALG_LIST_NO_ID, "title": "No, sin alergias", "description": "No tengo alergias conocidas"},
+                {"id": ALG_LIST_SI_ID, "title": "Sí, tengo alergias", "description": "Luego te pido a qué y qué te pasó"},
+            ],
+        }
+    ]
+
+    # Firma 1
     try:
-        # Estructura de WhatsApp List Message (heyoo):
-        # header (opcional), body (texto principal), button_text (el botón que abre la lista),
-        # sections: lista de secciones con rows (cada row tiene id/title/description)
         wa_client.send_list(
             recipient_id=user_id,
             header="Alergias",
             body="¿Tenés *alguna alergia conocida*? Elegí una opción:",
-            button_text="Elegir opción",
-            sections=[
-                {
-                    "title": "Opciones",
-                    "rows": [
-                        {"id": ALG_LIST_NO_ID, "title": "No, sin alergias", "description": "No tengo alergias conocidas"},
-                        {"id": ALG_LIST_SI_ID, "title": "Sí, tengo alergias", "description": "Luego te pido a qué y qué te pasó"},
-                    ],
-                }
-            ],
+            button="Elegir opción",
+            sections=sections,
             footer="Podés cambiar tu respuesta después si te acordás de algo.",
         )
         return True
-    except Exception:
-        # Fallback a texto plano si por algún motivo falla la lista
+    except TypeError:
+        # Firma 2 (algunas versiones)
         try:
-            wa_client.send_message(
-                message="¿Tenés *alguna alergia conocida*?\nRespondé 1) No, sin alergias  ó  2) Sí, tengo alergias",
+            wa_client.send_list(
+                header="Alergias",
+                body="¿Tenés *alguna alergia conocida*? Elegí una opción:",
+                button_text="Elegir opción",
+                sections=sections,
+                footer="Podés cambiar tu respuesta después si te acordás de algo.",
                 recipient_id=user_id,
             )
+            return True
         except Exception:
             pass
-        return False
+    except Exception:
+        pass
 
+    # Fallback: botones
+    try:
+        wa_client.send_button(
+            recipient_id=user_id,
+            header="Alergias",
+            body="¿Tenés *alguna alergia conocida*?",
+            footer="Si elegís Sí, te pedimos detalles.",
+            buttons=[
+                {"type": "reply", "reply": {"id": ALG_LIST_NO_ID, "title": "No, sin alergias"}},
+                {"type": "reply", "reply": {"id": ALG_LIST_SI_ID, "title": "Sí, tengo alergias"}},
+            ],
+        )
+        return True
+    except Exception:
+        pass
+
+    # Último recurso: texto
+    try:
+        wa_client.send_message(
+            message="¿Tenés *alguna alergia conocida*?\nRespondé 1) No, sin alergias  ó  2) Sí, tengo alergias",
+            recipient_id=user_id,
+        )
+        return False
+    except Exception:
+        return False
 
 # ====== Core TRIAGE ======
 def _triage_block(state: ConversationState, text: str) -> Tuple[list[str], ConversationState]:
@@ -302,9 +329,8 @@ async def webhook(req: Request):
             })
         # Si trae ≥3 campos, seguimos al triage con ese mismo texto.
 
-    # ------ Atajos para botones de Alergias ------
-    # Si el usuario presiona “No, sin alergias”: guardamos y seguimos flujo normal.
-    if text == ALG_BTN_NO_ID and state.module_idx == 1:
+    # ------ Acciones de LISTA Alergias ------
+    if text in (ALG_LIST_NO_ID,) and state.module_idx == 1:
         # Marcar sin alergias
         patch = {
             "ficha": {
@@ -314,14 +340,12 @@ async def webhook(req: Request):
             }
         }
         state = merge_state(state, patch)
-        # Forzar confirm y avanzar a siguiente módulo (medicación)
         snapshot = {"ficha": _to_dict(getattr(state, "ficha", {}))}
         confirm = summarize_patch_for_confirmation(snapshot, 1)
-        # Avanzamos manualmente
-        state.module_idx = 2  # Medicación
+        # Avanzamos a Medicación (módulo 2)
+        state.module_idx = 2
         save_state(state)
 
-        # Enviamos confirmación y prompt del siguiente módulo
         sent = []
         try:
             if confirm:
@@ -338,15 +362,12 @@ async def webhook(req: Request):
             "module": MODULES[state.module_idx]["name"] if 0 <= state.module_idx < len(MODULES) else None,
         })
 
-    # Si el usuario presiona “Sí, tengo alergias”: NO avanzar.
-    # Pedimos detalle abierto (sustancia + reacción).
-    if text == ALG_BTN_SI_ID and state.module_idx == 1:
-        q = "Perfecto. Contame *a qué* sos alérgico y *qué te pasó* (por ejemplo: rash/ronchas, hinchazón, falta de aire, shock)."
+    if text in (ALG_LIST_SI_ID,) and state.module_idx == 1:
+        q = "Perfecto. Contame *a qué* sos alérgico y *qué te pasó* (ej: rash/ronchas, hinchazón, falta de aire, shock)."
         try:
             wa_client.send_message(message=q, recipient_id=user_id)
         except Exception:
             pass
-        # Marcamos que seguimos en el mismo módulo para esperar el detalle.
         state._last_failed_module = state.module_idx
         save_state(state)
         return JSONResponse({
@@ -367,11 +388,11 @@ async def webhook(req: Request):
     state._last_text = text
 
     sent = []
-    # Si el siguiente módulo a llenar es Alergias (idx=1), preferimos enviar BOTONES en vez del prompt plano.
-    for i, msg in enumerate(messages or []):
-        if not msg:
+    for msg in (messages or []):
+        if not msg: 
             continue
-        # Si estamos por pedir Alergias, sustituimos ese mensaje por botones interactivos
+
+        # Si vamos a pedir Alergias, usamos LISTA interactiva en lugar del prompt plano
         if state.module_idx == 1 and msg == MODULES[1]["prompt"]:
             ok = _send_alergias_list(user_id)
             sent.append(ok)
