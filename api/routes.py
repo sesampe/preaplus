@@ -48,6 +48,7 @@ def save_state(state: ConversationState):
     _USER_STATE[state.user_id] = state
 
 # ====== Helpers ======
+
 def _extract_incoming(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     """Devuelve (text, message_id) o ('__IGNORE__', None) si es status/otro tipo.
     Soporta text e interactive.button_reply / interactive.list_reply.
@@ -166,38 +167,45 @@ def _count_core_fields_in_patch(preview: Dict[str, Any]) -> int:
 ALG_BTN_NO_ID = "ALG_NO"  # payload estable
 ALG_BTN_SI_ID = "ALG_SI"
 
-def _send_alergias_buttons(user_id: str):
+def _send_alergias_list(user_id: str) -> bool:
     """
-    Envía botones 'No, sin alergias' y 'Sí, tengo alergias'.
-    Usamos send_button de heyoo (WhatsApp Cloud API: interactive buttons).
+    Envía una LISTA interactiva con dos opciones:
+      - No, sin alergias
+      - Sí, tengo alergias
+    Al tocar el botón, se despliega la lista (UX nativa de WhatsApp).
     """
     try:
-        wa_client.send_button(
+        # Estructura de WhatsApp List Message (heyoo):
+        # header (opcional), body (texto principal), button_text (el botón que abre la lista),
+        # sections: lista de secciones con rows (cada row tiene id/title/description)
+        wa_client.send_list(
             recipient_id=user_id,
-            button={"title": "Elegí una opción"},
-            buttons=[
-                {"type": "reply", "reply": {"id": ALG_BTN_NO_ID, "title": "No, sin alergias"}},
-                {"type": "reply", "reply": {"id": ALG_BTN_SI_ID, "title": "Sí, tengo alergias"}},
+            header="Alergias",
+            body="¿Tenés *alguna alergia conocida*? Elegí una opción:",
+            button_text="Elegir opción",
+            sections=[
+                {
+                    "title": "Opciones",
+                    "rows": [
+                        {"id": ALG_LIST_NO_ID, "title": "No, sin alergias", "description": "No tengo alergias conocidas"},
+                        {"id": ALG_LIST_SI_ID, "title": "Sí, tengo alergias", "description": "Luego te pido a qué y qué te pasó"},
+                    ],
+                }
             ],
-            body=(
-                "¿Tenés *alguna alergia conocida*? Podés elegir una opción.\n"
-                "Si marcás que *sí*, después te pregunto a qué sos alérgico y qué te pasó."
-            ),
+            footer="Podés cambiar tu respuesta después si te acordás de algo.",
         )
         return True
     except Exception:
-        # fallback: texto plano si falla interactive
+        # Fallback a texto plano si por algún motivo falla la lista
         try:
             wa_client.send_message(
-                message=(
-                    "¿Tenés *alguna alergia conocida*?\n"
-                    "Respondé 1) No, sin alergias  ó  2) Sí, tengo alergias"
-                ),
+                message="¿Tenés *alguna alergia conocida*?\nRespondé 1) No, sin alergias  ó  2) Sí, tengo alergias",
                 recipient_id=user_id,
             )
         except Exception:
             pass
         return False
+
 
 # ====== Core TRIAGE ======
 def _triage_block(state: ConversationState, text: str) -> Tuple[list[str], ConversationState]:
@@ -365,7 +373,7 @@ async def webhook(req: Request):
             continue
         # Si estamos por pedir Alergias, sustituimos ese mensaje por botones interactivos
         if state.module_idx == 1 and msg == MODULES[1]["prompt"]:
-            ok = _send_alergias_buttons(user_id)
+            ok = _send_alergias_list(user_id)
             sent.append(ok)
             continue
 
