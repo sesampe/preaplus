@@ -2,6 +2,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from typing import Dict, Any, Tuple, Optional
 from datetime import datetime
+import os
+import httpx  # para enviar mensajes RAW a Graph API (interactive list)
 
 from core.settings import HEYOO_PHONE_ID, HEYOO_TOKEN
 from heyoo import WhatsApp
@@ -18,6 +20,8 @@ from core.steps import (
 
 router = APIRouter()
 wa_client = WhatsApp(token=HEYOO_TOKEN, phone_number_id=HEYOO_PHONE_ID)
+
+GRAPH_VERSION = os.getenv("WA_GRAPH_VERSION", "v20.0")  # cambiable por env si hace falta
 
 # Número de prueba (ajustá al tuyo)
 HARDCODED_USER_ID = "542616463629"
@@ -164,67 +168,76 @@ def _count_core_fields_in_patch(preview: Dict[str, Any]) -> int:
 ALG_LIST_NO_ID = "ALG_NO"
 ALG_LIST_SI_ID = "ALG_SI"
 
-# ====== UI Helper: LISTA interactiva ======
+# ====== UI Helper: LISTA interactiva (RAW Graph API) ======
 def _send_alergias_list(user_id: str) -> bool:
     """
     Envía una LISTA interactiva nativa de WhatsApp con dos opciones.
-    Intenta distintas firmas de heyoo para ser compatible con versiones.
+    Se usa HTTP crudo para evitar incompatibilidades de 'heyoo'.
     """
-    sections = [
-        {
-            "title": "Opciones",
-            "rows": [
-                {"id": ALG_LIST_NO_ID, "title": "No, sin alergias", "description": "No tengo alergias conocidas"},
-                {"id": ALG_LIST_SI_ID, "title": "Sí, tengo alergias", "description": "Luego te pido a qué y qué te pasó"},
-            ],
-        }
-    ]
+    url = f"https://graph.facebook.com/{GRAPH_VERSION}/{HEYOO_PHONE_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {HEYOO_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": user_id,
+        "type": "interactive",
+        "interactive": {
+            "type": "list",
+            "header": {"type": "text", "text": "Alergias"},
+            "body": {"text": "¿Tenés *alguna alergia conocida*? Elegí una opción:"},
+            "footer": {"text": "Podés cambiar tu respuesta más tarde."},
+            "action": {
+                "button": "Elegir opción",
+                "sections": [
+                    {
+                        "title": "Opciones",
+                        "rows": [
+                            {"id": ALG_LIST_NO_ID, "title": "No, sin alergias", "description": "No tengo alergias conocidas"},
+                            {"id": ALG_LIST_SI_ID, "title": "Sí, tengo alergias", "description": "Luego te pido a qué y qué te pasó"},
+                        ],
+                    }
+                ],
+            },
+        },
+    }
 
-    # Firma 1
     try:
-        wa_client.send_list(
-            recipient_id=user_id,
-            header="Alergias",
-            body="¿Tenés *alguna alergia conocida*? Elegí una opción:",
-            button="Elegir opción",
-            sections=sections,
-            footer="Podés cambiar tu respuesta después si te acordás de algo.",
-        )
-        return True
-    except TypeError:
-        # Firma 2 (algunas versiones)
-        try:
-            wa_client.send_list(
-                header="Alergias",
-                body="¿Tenés *alguna alergia conocida*? Elegí una opción:",
-                button_text="Elegir opción",
-                sections=sections,
-                footer="Podés cambiar tu respuesta después si te acordás de algo.",
-                recipient_id=user_id,
-            )
-            return True
-        except Exception:
-            pass
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.post(url, headers=headers, json=payload)
+            if resp.status_code // 100 == 2:
+                return True
     except Exception:
         pass
 
-    # Fallback: botones
+    # Fallback: botón interactivo (RAW)
+    payload_btn = {
+        "messaging_product": "whatsapp",
+        "to": user_id,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "header": {"type": "text", "text": "Alergias"},
+            "body": {"text": "¿Tenés *alguna alergia conocida*?"},
+            "footer": {"text": "Si elegís Sí, te pedimos detalles."},
+            "action": {
+                "buttons": [
+                    {"type": "reply", "reply": {"id": ALG_LIST_NO_ID, "title": "No, sin alergias"}},
+                    {"type": "reply", "reply": {"id": ALG_LIST_SI_ID, "title": "Sí, tengo alergias"}},
+                ]
+            },
+        },
+    }
     try:
-        wa_client.send_button(
-            recipient_id=user_id,
-            header="Alergias",
-            body="¿Tenés *alguna alergia conocida*?",
-            footer="Si elegís Sí, te pedimos detalles.",
-            buttons=[
-                {"type": "reply", "reply": {"id": ALG_LIST_NO_ID, "title": "No, sin alergias"}},
-                {"type": "reply", "reply": {"id": ALG_LIST_SI_ID, "title": "Sí, tengo alergias"}},
-            ],
-        )
-        return True
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.post(url, headers=headers, json=payload_btn)
+            if resp.status_code // 100 == 2:
+                return True
     except Exception:
         pass
 
-    # Último recurso: texto
+    # Último recurso: texto plano
     try:
         wa_client.send_message(
             message="¿Tenés *alguna alergia conocida*?\nRespondé 1) No, sin alergias  ó  2) Sí, tengo alergias",
@@ -332,13 +345,7 @@ async def webhook(req: Request):
     # ------ Acciones de LISTA Alergias ------
     if text in (ALG_LIST_NO_ID,) and state.module_idx == 1:
         # Marcar sin alergias
-        patch = {
-            "ficha": {
-                "alergia_medicacion": {
-                    "alergias": {"tiene_alergias": False, "detalle": []}
-                }
-            }
-        }
+        patch = {"ficha": {"alergia_medicacion": {"alergias": {"tiene_alergias": False, "detalle": []}}}}
         state = merge_state(state, patch)
         snapshot = {"ficha": _to_dict(getattr(state, "ficha", {}))}
         confirm = summarize_patch_for_confirmation(snapshot, 1)
@@ -389,7 +396,7 @@ async def webhook(req: Request):
 
     sent = []
     for msg in (messages or []):
-        if not msg: 
+        if not msg:
             continue
 
         # Si vamos a pedir Alergias, usamos LISTA interactiva en lugar del prompt plano

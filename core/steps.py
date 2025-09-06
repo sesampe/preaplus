@@ -855,7 +855,6 @@ def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
         heur = normalize_motivo_clinico_heuristic(candidate) or ""
         cand_low = candidate.strip().lower()
         heur_low = heur.strip().lower()
-        # Si la heurística no agrega semántica (solo capitaliza), usamos comillas
         if heur_low == cand_low or not heur:
             quoted = f"\"{candidate.strip()}\""
             patch_quote = {"ficha": {"cobertura": {"motivo_cirugia": quoted}}}
