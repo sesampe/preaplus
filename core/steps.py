@@ -38,9 +38,8 @@ MODULES = [
         "name": "Medicación habitual",
         "use_llm": True,
         "prompt": (
-            "¿Tomás medicación habitual, *incluyendo puff/inhaladores*? Podés decir el *nombre "
-            "comercial* si no sabés el genérico. Si sabés la *dosis en mg* del blister, mejor. "
-            "Si no la sabés, no pasa nada.\n"
+            "¿Tomás alguna medicación / usas puff? \n"
+            "Si sabés la *dosis, mejor\n"
             "Ejemplos: \"Enalapril 10 mg cada mañana\", \"Sertal\", \"Seretide puff 2 veces al día\"."
         ),
     },
