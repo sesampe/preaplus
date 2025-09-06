@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 from typing import Dict, Any, Tuple, Optional
 from datetime import datetime
 import os
-import httpx  # para enviar mensajes RAW a Graph API (interactive list)
+import httpx  # envío RAW a Graph API para listas
 
 from core.settings import HEYOO_PHONE_ID, HEYOO_TOKEN
 from heyoo import WhatsApp
@@ -21,7 +21,7 @@ from core.steps import (
 router = APIRouter()
 wa_client = WhatsApp(token=HEYOO_TOKEN, phone_number_id=HEYOO_PHONE_ID)
 
-GRAPH_VERSION = os.getenv("WA_GRAPH_VERSION", "v20.0")  # cambiable por env si hace falta
+GRAPH_VERSION = os.getenv("WA_GRAPH_VERSION", "v20.0")
 
 # Número de prueba (ajustá al tuyo)
 HARDCODED_USER_ID = "542616463629"
@@ -149,9 +149,6 @@ def _missing_form_snippet(missing: list[str]) -> str:
     return "\n".join(lines)
 
 def _count_core_fields_in_patch(preview: Dict[str, Any]) -> int:
-    """
-    Cuenta solo los campos núcleo dentro de preview['ficha'].
-    """
     p = preview.get("ficha", {}) if isinstance(preview, dict) else {}
     c = 0
     if _has(p.get("dni")): c += 1
@@ -172,7 +169,7 @@ ALG_LIST_SI_ID = "ALG_SI"
 def _send_alergias_list(user_id: str) -> bool:
     """
     Envía una LISTA interactiva nativa de WhatsApp con dos opciones.
-    Se usa HTTP crudo para evitar incompatibilidades de 'heyoo'.
+    Sin footer ni descriptions (para que el chat del usuario no muestre texto extra).
     """
     url = f"https://graph.facebook.com/{GRAPH_VERSION}/{HEYOO_PHONE_ID}/messages"
     headers = {
@@ -185,17 +182,16 @@ def _send_alergias_list(user_id: str) -> bool:
         "type": "interactive",
         "interactive": {
             "type": "list",
-            "header": {"type": "text", "text": "Alergias"},
-            "body": {"text": "¿Tenés *alguna alergia conocida*? Elegí una opción:"},
-            "footer": {"text": "Podés cambiar tu respuesta más tarde."},
+            "header": {"type": "text", "text": "ALERGIAS"},
+            "body": {"text": "¿Sos alérgico a alguna medicación o comida?"},
             "action": {
                 "button": "Elegir opción",
                 "sections": [
                     {
                         "title": "Opciones",
                         "rows": [
-                            {"id": ALG_LIST_NO_ID, "title": "No, sin alergias", "description": "No tengo alergias conocidas"},
-                            {"id": ALG_LIST_SI_ID, "title": "Sí, tengo alergias", "description": "Luego te pido a qué y qué te pasó"},
+                            {"id": ALG_LIST_NO_ID, "title": "No, sin alergias"},
+                            {"id": ALG_LIST_SI_ID, "title": "Sí, tengo alergias"},
                         ],
                     }
                 ],
@@ -218,9 +214,8 @@ def _send_alergias_list(user_id: str) -> bool:
         "type": "interactive",
         "interactive": {
             "type": "button",
-            "header": {"type": "text", "text": "Alergias"},
-            "body": {"text": "¿Tenés *alguna alergia conocida*?"},
-            "footer": {"text": "Si elegís Sí, te pedimos detalles."},
+            "header": {"type": "text", "text": "ALERGIAS"},
+            "body": {"text": "¿Sos alérgico a alguna medicación o comida?"},
             "action": {
                 "buttons": [
                     {"type": "reply", "reply": {"id": ALG_LIST_NO_ID, "title": "No, sin alergias"}},
@@ -240,7 +235,7 @@ def _send_alergias_list(user_id: str) -> bool:
     # Último recurso: texto plano
     try:
         wa_client.send_message(
-            message="¿Tenés *alguna alergia conocida*?\nRespondé 1) No, sin alergias  ó  2) Sí, tengo alergias",
+            message="¿Sos alérgico a alguna medicación o comida?\nRespondé 1) No, sin alergias  ó  2) Sí, tengo alergias",
             recipient_id=user_id,
         )
         return False
@@ -273,7 +268,7 @@ def _triage_block(state: ConversationState, text: str) -> Tuple[list[str], Conve
         faltan = _missing_mod0_required(state)
         if faltan:
             if confirm:
-                messages.append(confirm)  # mostrar solo lo que sí obtuvimos
+                messages.append(confirm)
             messages.append("Me faltó completar estos campos. Copiá y pegá este mini-formulario y rellenalo:")
             messages.append(_missing_form_snippet(faltan))
             state._last_failed_module = module_idx
@@ -320,7 +315,6 @@ async def webhook(req: Request):
         state._has_greeted = True
         save_state(state)
 
-        # preview SOLO con regex locales; contamos campos reales
         preview = fill_from_text_modular(state, state.module_idx, text or "") or {}
         count = _count_core_fields_in_patch(preview)
 
@@ -340,7 +334,6 @@ async def webhook(req: Request):
                 "sent": [True, True, True],
                 "module": MODULES[state.module_idx]["name"],
             })
-        # Si trae ≥3 campos, seguimos al triage con ese mismo texto.
 
     # ------ Acciones de LISTA Alergias ------
     if text in (ALG_LIST_NO_ID,) and state.module_idx == 1:
@@ -370,12 +363,12 @@ async def webhook(req: Request):
         })
 
     if text in (ALG_LIST_SI_ID,) and state.module_idx == 1:
-        q = "Perfecto. Contame *a qué* sos alérgico y *qué te pasó* (ej: rash/ronchas, hinchazón, falta de aire, shock)."
+        q = "Contame *a qué* sos alérgico y *qué te pasó* (ej: rash/ronchas, hinchazón, falta de aire, shock)."
         try:
             wa_client.send_message(message=q, recipient_id=user_id)
         except Exception:
             pass
-        state._last_failed_module = state.module_idx
+        state._last_failed_module = state.module_idx  # seguimos en módulo 1 esperando detalle
         save_state(state)
         return JSONResponse({
             "to": user_id,
