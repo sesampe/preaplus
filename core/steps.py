@@ -26,9 +26,23 @@ MODULES = [
         ),
     },
     {
-        "name": "Alergias y medicación",
-        "use_llm": False,
-        "prompt": "¿Tenés alergias? ¿Tomás medicación habitual? Indicá nombres/dosis si podés.",
+        "name": "Alergias",
+        "use_llm": True,
+        "prompt": (
+            "¿Tenés *alguna alergia conocida*? (comidas, medicación, látex, etc.)\n"
+            "Si la tenés, contame *a qué* y *qué te pasó* en tus palabras (ej: ronchas/rash, "
+            "hinchazón, falta de aire, picazón, shock). Si no, decí: \"no alergias conocidas\"."
+        ),
+    },
+    {
+        "name": "Medicación habitual",
+        "use_llm": True,
+        "prompt": (
+            "¿Tomás medicación habitual, *incluyendo puff/inhaladores*? Podés decir el *nombre "
+            "comercial* si no sabés el genérico. Si sabés la *dosis en mg* que figura en el blister, "
+            "mejor. Si no la sabés, no pasa nada.\n"
+            "Ejemplos: \"Enalapril 10 mg cada mañana\", \"Sertal\", \"Seretide puff 2 veces al día\"."
+        ),
     },
     {
         "name": "Antecedentes",
@@ -418,43 +432,78 @@ def _parse_generales(text: str) -> Dict[str, Any]:
 
     return {"ficha": ficha} if ficha else {}
 
-# ---------------- Parsers 1..5 (idénticos) ----------------
-_ALERG_RE = re.compile(r"(?:alergias?|al[ée]rgico[as]?)\s*:?\s*[- ]*(?P<alergias>.+)", re.IGNORECASE)
-_MEDIC_RE = re.compile(r"(?:medicaci[oó]n|tomo|tomas|toma)\s*:?\s*[- ]*(?P<medicacion>.+)", re.IGNORECASE)
-_ANTEC_RE = re.compile(r"(?:antecedentes?|enfermedades?|patolog[ií]a?s?)\s*:?\s*[- ]*(?P<antecedentes>.+)", re.IGNORECASE)
-_COMPL_RE = re.compile(r"(?:estudios?|laboratorio|lab[s]?|electro|ecg|rx|placa|tc|mri|rmn)\s*:?\s*[- ]*(?P<complementarios>.+)", re.IGNORECASE)
-_TABA_RE = re.compile(r"(?:tabaco|fumo|fum[oé]s?|cigarrillos?)\s*:?\s*[- ]*(?P<tabaco>.+)", re.IGNORECASE)
-_ALCO_RE = re.compile(r"(?:alcohol|beb[eo]s?)\s*:?\s*[- ]*(?P<alcohol>.+)", re.IGNORECASE)
-_OTRAS_RE = re.compile(r"(?:drogas?|sustancias?)\s*:?\s*[- ]*(?P<otras>.+)", re.IGNORECASE)
-_VA_RE = re.compile(r"(?:v[ií]a\s*a[ée]rea|mallampati|apertura|bucal|dentari[ao]s?|piezas|pr[oó]tesis)\s*:?\s*[- ]*(?P<via_aerea>.+)", re.IGNORECASE)
+# ---------------- Parsers por módulo ----------------
+_ALERG_RE_FREE = re.compile(r"(?:alergias?|al[ée]rgico[as]?)\b[:\s-]*([^\n]+)", re.IGNORECASE)
+_NO_ALERG_RE = re.compile(r"\b(no|ninguna?)\b.*\b(alergia|alergias)\b", re.IGNORECASE)
 
-def _parse_alerg_med(text: str) -> Dict[str, Any]:
+_MEDIC_RE_FREE = re.compile(
+    r"(?:medicaci[oó]n|tomo|tomas|toma|puff|inhalador(?:es)?)\b[:\s-]*([^\n]+)",
+    re.IGNORECASE
+)
+
+def _parse_alergias(text: str) -> Dict[str, Any]:
+    s = (text or "").strip()
+    if not s:
+        return {}
     out: Dict[str, Any] = {}
-    ma = _ALERG_RE.search(text or "")
-    if ma:
-        out.setdefault("alergia_medicacion", {})
-        out["alergia_medicacion"]["alergias"] = {
-            "tiene_alergias": True,
-            "detalle": [{"sustancia": ma.group("alergias").strip()}]
+    if _NO_ALERG_RE.search(s):
+        out = {
+            "alergia_medicacion": {
+                "alergias": {
+                    "tiene_alergias": False,
+                    "detalle": []
+                }
+            }
         }
-    mm = _MEDIC_RE.search(text or "")
-    if mm:
-        out.setdefault("alergia_medicacion", {})
-        out["alergia_medicacion"].setdefault("medicacion_habitual", [])
-        out["alergia_medicacion"]["medicacion_habitual"].append({"droga": mm.group("medicacion").strip()})
+        return {"ficha": out}
+
+    m = _ALERG_RE_FREE.search(s)
+    if m:
+        detalle_txt = m.group(1).strip()
+        if detalle_txt:
+            out = {
+                "alergia_medicacion": {
+                    "alergias": {
+                        "tiene_alergias": True,
+                        "detalle": [{"sustancia": detalle_txt}]
+                    }
+                }
+            }
+    return {"ficha": out} if out else {}
+
+def _parse_medicacion(text: str) -> Dict[str, Any]:
+    s = (text or "").strip()
+    if not s:
+        return {}
+    out: Dict[str, Any] = {}
+    m = _MEDIC_RE_FREE.search(s)
+    if m:
+        meds = m.group(1).strip()
+        if meds:
+            out = {
+                "alergia_medicacion": {
+                    "medicacion_habitual": [{"droga": meds}]
+                }
+            }
     return {"ficha": out} if out else {}
 
 def _parse_antecedentes(text: str) -> Dict[str, Any]:
+    _ANTEC_RE = re.compile(r"(?:antecedentes?|enfermedades?|patolog[ií]a?s?)\s*:?\s*[- ]*(?P<antecedentes>.+)", re.IGNORECASE)
     m = _ANTEC_RE.search(text or "")
     if not m: return {}
     return {"ficha": {"antecedentes": {"otros": [m.group("antecedentes").strip()]}}}
 
 def _parse_complementarios(text: str) -> Dict[str, Any]:
+    _COMPL_RE = re.compile(r"(?:estudios?|laboratorio|lab[s]?|electro|ecg|rx|placa|tc|mri|rmn)\s*:?\s*[- ]*(?P<complementarios>.+)", re.IGNORECASE)
     m = _COMPL_RE.search(text or "")
     if not m: return {}
     return {"ficha": {"complementarios": {"imagenes": [{"estudio": m.group("complementarios").strip()}]}}}
 
 def _parse_sustancias(text: str) -> Dict[str, Any]:
+    _TABA_RE = re.compile(r"(?:tabaco|fumo|fum[oé]s?|cigarrillos?)\s*:?\s*[- ]*(?P<tabaco>.+)", re.IGNORECASE)
+    _ALCO_RE = re.compile(r"(?:alcohol|beb[eo]s?)\s*:?\s*[- ]*(?P<alcohol>.+)", re.IGNORECASE)
+    _OTRAS_RE = re.compile(r"(?:drogas?|sustancias?)\s*:?\s*[- ]*(?P<otras>.+)", re.IGNORECASE)
+
     out: Dict[str, Any] = {}
     mt = _TABA_RE.search(text or "")
     if mt:
@@ -471,17 +520,19 @@ def _parse_sustancias(text: str) -> Dict[str, Any]:
     return {"ficha": out} if out else {}
 
 def _parse_via_aerea(text: str) -> Dict[str, Any]:
+    _VA_RE = re.compile(r"(?:v[ií]a\s*a[ée]rea|mallampati|apertura|bucal|dentari[ao]s?|piezas|pr[oó]tesis)\s*:?\s*[- ]*(?P<via_aerea>.+)", re.IGNORECASE)
     m = _VA_RE.search(text or "")
     if not m: return {}
     return {"ficha": {"via_aerea": {"otros": [m.group("via_aerea").strip()]}}}
 
 _PARSERS = {
     0: _parse_generales,
-    1: _parse_alerg_med,
-    2: _parse_antecedentes,
-    3: _parse_complementarios,
-    4: _parse_sustancias,
-    5: _parse_via_aerea,
+    1: _parse_alergias,          # NUEVO módulo 1
+    2: _parse_medicacion,        # NUEVO módulo 2
+    3: _parse_antecedentes,
+    4: _parse_complementarios,
+    5: _parse_sustancias,
+    6: _parse_via_aerea,
 }
 
 def fill_from_text_modular(state: Any, module_idx: int, text: str) -> Dict[str, Any]:
@@ -525,6 +576,7 @@ def _call_openai(messages: list[dict], max_tokens: int = 128) -> Optional[str]:
         except Exception:
             return None
 
+# ---- LLM: Generales (ya existente) ----
 def _llm_extract_generales_full(text: str) -> Dict[str, Any]:
     """Extractor LLM para respuestas libres del Módulo 0."""
     if not (text or "").strip():
@@ -634,69 +686,163 @@ def _llm_extract_generales_full(text: str) -> Dict[str, Any]:
 
     return {"ficha": ficha} if ficha else {}
 
-# ============================================================================
-# LLM: normalización del motivo (Módulo 0)
-# ============================================================================
-def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
-    if module_idx != 0:
+# ---- LLM: Alergias (módulo 1) ----
+def _llm_extract_alergias(text: str) -> Dict[str, Any]:
+    """
+    Devuelve:
+    {
+      "tiene_alergias": true/false,
+      "detalles": [{"sustancia": str, "reaccion": str|null}, ...]
+    }
+    """
+    if not (text or "").strip():
+        return {}
+    system = (
+        "Sos un extractor clínico. A partir de un texto libre en español, devolvé SOLO JSON con este esquema: "
+        '{"tiene_alergias": bool, "detalles": [{"sustancia": str, "reaccion": str|null}]}. '
+        "Considerá alergias a comidas, fármacos, látex y otras. Si el paciente niega, usá tiene_alergias=false y detalles=[]. "
+        "Si describe síntomas (rash/ronchas, edema, broncoespasmo, anafilaxia/shock, picazón, etc.), ponelos en 'reaccion'."
+    )
+    user = f"Texto del paciente:\n{text}"
+    raw = _call_openai(
+        messages=[{"role": "system", "content": system},
+                  {"role": "user", "content": user}],
+        max_tokens=250
+    )
+    try:
+        obj = json.loads(raw) if raw else {}
+    except Exception:
+        obj = {}
+    if not isinstance(obj, dict):
         return {}
 
-    patch_total: Dict[str, Any] = {}
+    tiene = bool(obj.get("tiene_alergias", False))
+    detalles = obj.get("detalles") or []
+    norm_detalles = []
+    for it in detalles:
+        if not isinstance(it, dict): continue
+        sust = (it.get("sustancia") or "").strip()
+        reac = (it.get("reaccion") or None)
+        if sust:
+            norm_detalles.append({"sustancia": sust, "reaccion": (reac or None)})
+    return {
+        "ficha": {
+            "alergia_medicacion": {
+                "alergias": {
+                    "tiene_alergias": tiene,
+                    "detalle": norm_detalles
+                }
+            }
+        }
+    }
 
-    patch_free = _llm_extract_generales_full(text or "")
-    if patch_free:
-        patch_total = _deep_merge_dict(patch_total, patch_free)
+# ---- LLM: Medicación (módulo 2) ----
+def _llm_extract_medicacion(text: str) -> Dict[str, Any]:
+    """
+    Devuelve lista normalizada de medicamentos:
+    [{"droga": principio_activo_o_nombre, "dosis": "10 mg", "frecuencia": "cada 12 h"}]
+    Acepta nombres comerciales e intenta mapear al principio activo.
+    Incluye puff/inhaladores.
+    """
+    if not (text or "").strip():
+        return {}
+    system = (
+        "Sos un normalizador de medicación. A partir de un texto en español con medicación habitual, "
+        "devolvé SOLO JSON con este esquema: "
+        '{"meds":[{"droga": str, "dosis": str|null, "frecuencia": str|null}]} '
+        "Aceptá nombres comerciales (mapear al principio activo cuando sea posible) y también inhaladores/puff. "
+        "Si no hay medicación, usá meds=[]. No inventes dosis."
+    )
+    user = f"Texto del paciente:\n{text}"
+    raw = _call_openai(
+        messages=[{"role": "system", "content": system},
+                  {"role": "user", "content": user}],
+        max_tokens=300
+    )
+    try:
+        obj = json.loads(raw) if raw else {}
+    except Exception:
+        obj = {}
+    meds_in = obj.get("meds") or []
+    meds_out = []
+    for it in meds_in:
+        if not isinstance(it, dict): continue
+        d = (it.get("droga") or "").strip()
+        if not d: continue
+        dosis = (it.get("dosis") or None)
+        frec = (it.get("frecuencia") or None)
+        meds_out.append({"droga": d, "dosis": dosis, "frecuencia": frec})
+    return {"ficha": {"alergia_medicacion": {"medicacion_habitual": meds_out}}}
 
-    # Normalización SNOMED opcional (best-effort)
-    m = re.search(r"(?im)^motivo.*?:\s*(.+)$", text or "")
-    candidate = (m.group(1).strip() if m else None) or ""
-    if not candidate:
-        m2 = re.search(
-            r"(oper(ar|aci[oó]n)|sac(ar|an)|extirpar|quitar|me\s+hacen|intervenci[oó]n)[:\s,-]*([^\n]+)",
-            text or "", re.IGNORECASE)
-        if m2:
-            candidate = (m2.group(4) or "").strip()
+# ============================================================================
+# LLM: normalización por módulo
+# ============================================================================
+def llm_parse_modular(text: str, module_idx: int) -> Dict[str, Any]:
+    if module_idx == 0:
+        patch_total: Dict[str, Any] = {}
 
-    if candidate:
-        system = (
-            "Eres un codificador clínico experto en procedimientos quirúrgicos. "
-            "Estandariza descripciones libres en español a un término/procedimiento SNOMED CT. "
-            "Responde SOLO en JSON: {\"term_es\": str, \"sctid\": str|null, \"fsn_en\": str|null, \"confidence\": num}."
-        )
-        user = (
-            "Texto del paciente (español):\n"
-            f"{text}\n\n"
-            f"Motivo libre detectado: {candidate}"
-        )
-        raw = _call_openai(
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": user}],
-            max_tokens=200,
-        )
-        if raw:
-            try:
-                obj = json.loads(raw)
-                term_es = (obj.get("term_es") or "").strip() or None
-                sctid = (obj.get("sctid") or None)
-                fsn = (obj.get("fsn_en") or None)
-                conf = float(obj.get("confidence") or 0)
-            except Exception:
-                term_es = raw.strip() if raw else None
-                sctid = fsn = None
-                conf = 0.0
+        patch_free = _llm_extract_generales_full(text or "")
+        if patch_free:
+            patch_total = _deep_merge_dict(patch_total, patch_free)
 
-            if term_es:
-                term_es = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s\-]", "", term_es).strip()
-                patch_sn = {}
-                if conf >= 0.7 or sctid:
-                    patch_sn = {"ficha": {"cobertura": {"motivo_cirugia": term_es}}}
-                if sctid or fsn:
-                    patch_sn.setdefault("ficha", {}).setdefault("cobertura", {})["motivo_snomed"] = {
-                        "sctid": sctid, "fsn_en": fsn, "confidence": conf
-                    }
-                patch_total = _deep_merge_dict(patch_total, patch_sn)
+        # Normalización SNOMED opcional (best-effort)
+        m = re.search(r"(?im)^motivo.*?:\s*(.+)$", text or "")
+        candidate = (m.group(1).strip() if m else None) or ""
+        if not candidate:
+            m2 = re.search(
+                r"(oper(ar|aci[oó]n)|sac(ar|an)|extirpar|quitar|me\s+hacen|intervenci[oó]n)[:\s,-]*([^\n]+)",
+                text or "", re.IGNORECASE)
+            if m2:
+                candidate = (m2.group(4) or "").strip()
 
-    return patch_total
+        if candidate:
+            system = (
+                "Eres un codificador clínico experto en procedimientos quirúrgicos. "
+                "Estandariza descripciones libres en español a un término/procedimiento SNOMED CT. "
+                "Responde SOLO en JSON: {\"term_es\": str, \"sctid\": str|null, \"fsn_en\": str|null, \"confidence\": num}."
+            )
+            user = (
+                "Texto del paciente (español):\n"
+                f"{text}\n\n"
+                f"Motivo libre detectado: {candidate}"
+            )
+            raw = _call_openai(
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": user}],
+                max_tokens=200,
+            )
+            if raw:
+                try:
+                    obj = json.loads(raw)
+                    term_es = (obj.get("term_es") or "").strip() or None
+                    sctid = (obj.get("sctid") or None)
+                    fsn = (obj.get("fsn_en") or None)
+                    conf = float(obj.get("confidence") or 0)
+                except Exception:
+                    term_es = raw.strip() if raw else None
+                    sctid = fsn = None
+                    conf = 0.0
+
+                if term_es:
+                    term_es = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s\-]", "", term_es).strip()
+                    patch_sn = {}
+                    if conf >= 0.65 or sctid:
+                        patch_sn = {"ficha": {"cobertura": {"motivo_cirugia": term_es}}}
+                    if sctid or fsn:
+                        patch_sn.setdefault("ficha", {}).setdefault("cobertura", {})["motivo_snomed"] = {
+                            "sctid": sctid, "fsn_en": fsn, "confidence": conf
+                        }
+                    patch_total = _deep_merge_dict(patch_total, patch_sn)
+
+        return patch_total
+
+    if module_idx == 1:  # Alergias
+        return _llm_extract_alergias(text or "")
+
+    if module_idx == 2:  # Medicación habitual
+        return _llm_extract_medicacion(text or "")
+
+    return {}
 
 # ============================================================================
 # Confirmación (solo campos presentes)
@@ -754,6 +900,40 @@ def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> 
             lines.append(f"• Motivo: {motivo}")
 
         return "\n".join([l for l in lines if l])
+
+    # Confirmación específica por módulo
+    if module_idx == 1:  # Alergias
+        am = ficha.get("alergia_medicacion", {}) if isinstance(ficha.get("alergia_medicacion"), dict) else {}
+        alg = am.get("alergias", {}) if isinstance(am.get("alergias"), dict) else {}
+        tiene = alg.get("tiene_alergias")
+        detalles = alg.get("detalle") or []
+        if tiene is False:
+            return "✔️ Registré: sin alergias conocidas."
+        if detalles:
+            lines = ["✔️ Alergias:"]
+            for d in detalles:
+                if not isinstance(d, dict): continue
+                sust = d.get("sustancia"); reac = d.get("reaccion")
+                if sust and reac:
+                    lines.append(f"• {sust}: {reac}")
+                elif sust:
+                    lines.append(f"• {sust}")
+            return "\n".join(lines)
+        return ""
+
+    if module_idx == 2:  # Medicación
+        am = ficha.get("alergia_medicacion", {}) if isinstance(ficha.get("alergia_medicacion"), dict) else {}
+        meds = am.get("medicacion_habitual") or []
+        if meds:
+            lines = ["✔️ Medicación habitual:"]
+            for m in meds:
+                if not isinstance(m, dict): continue
+                droga = m.get("droga"); dosis = m.get("dosis"); frec = m.get("frecuencia")
+                if not droga: continue
+                extra = " ".join(x for x in [dosis or "", f"({frec})" if frec else ""] if x).strip()
+                lines.append(f"• {droga}" + (f" — {extra}" if extra else ""))
+            return "\n".join(lines)
+        return ""
 
     public_items = [(k, v) for k, v in ficha.items() if not str(k).startswith("_")]
     if not public_items:
