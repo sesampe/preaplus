@@ -54,44 +54,42 @@ def save_state(state: ConversationState):
 
 # ===== Helpers =====
 def _extract_incoming(payload: Dict[str, Any]) -> Tuple[str, Optional[str]]:
-    """Devuelve (text, message_id) o ('__IGNORE__', None) en callbacks de status/typing/etc."""
+    """Devuelve (text, message_id) solo para mensajes reales de WhatsApp (text/interactive).
+    Evita procesar payloads de prueba o callbacks que podrían avanzar el flujo sin intervención del paciente.
+    """
     try:
         entry = payload.get("entry", [])[0]
         change = entry.get("changes", [])[0]
         value = change.get("value", {})
 
-        if value.get("statuses"):  # delivery/read
+        # callbacks de entrega/lectura -> ignorar
+        if value.get("statuses"):
             return "__IGNORE__", None
 
         msgs = value.get("messages") or []
-        if msgs:
-            msg = msgs[0]
-            msg_type = msg.get("type")
-            msg_id = msg.get("id")
+        if not msgs:
+            return "__IGNORE__", None  # <<< NO hay mensaje real
 
-            if msg_type == "text":
-                body = (msg.get("text", {}) or {}).get("body", "") or ""
-                return body, msg_id
+        msg = msgs[0]
+        msg_type = msg.get("type")
+        msg_id = msg.get("id")
 
-            if msg_type == "interactive":
-                it = msg.get("interactive", {}) or {}
-                if it.get("type") == "button_reply":
-                    br = it.get("button_reply", {}) or {}
-                    return (br.get("id") or br.get("title") or "").strip(), msg_id
-                if it.get("type") == "list_reply":
-                    lr = it.get("list_reply", {}) or {}
-                    return (lr.get("id") or lr.get("title") or "").strip(), msg_id
+        if msg_type == "text":
+            body = (msg.get("text", {}) or {}).get("body", "") or ""
+            return body, msg_id
 
-            return "__IGNORE__", msg_id
+        if msg_type == "interactive":
+            it = msg.get("interactive", {}) or {}
+            if it.get("type") == "button_reply":
+                br = it.get("button_reply", {}) or {}
+                return (br.get("id") or br.get("title") or "").strip(), msg_id
+            if it.get("type") == "list_reply":
+                lr = it.get("list_reply", {}) or {}
+                return (lr.get("id") or lr.get("title") or "").strip(), msg_id
+
+        return "__IGNORE__", msg_id
     except Exception:
-        pass
-
-    # fallback modo test
-    text = payload.get("text") or payload.get("message") or payload.get("body") or ""
-    mid = payload.get("message_id")
-    if not text:
-        return "__IGNORE__", mid
-    return text, mid
+        return "__IGNORE__", None
 
 def _dig(obj: Any, path: list[str]) -> Any:
     cur = obj
@@ -284,12 +282,12 @@ async def webhook(req: Request):
     text, message_id = _extract_incoming(payload)
 
     if text == "__IGNORE__":
-        return JSONResponse({"ok": True, "ignored": "non_text_or_status"})
+        return JSONResponse({"ok": True, "ignored": "non_user_message"})
 
     user_id = HARDCODED_USER_ID
     state = load_state(user_id)
 
-    # dedupe
+    # dedupe por id de mensaje
     if message_id and message_id in state._handled_msg_ids:
         return JSONResponse({"ok": True, "ignored": "duplicate_message"})
     if message_id:
@@ -361,7 +359,7 @@ async def webhook(req: Request):
             "module": MODULES[state.module_idx]["name"],
         })
 
-    # Anti-bucle
+    # Anti-bucle: no procesar el mismo texto consecutivo en el mismo módulo cuando estamos esperando algo
     if text == state._last_text and state._last_failed_module == state.module_idx:
         return JSONResponse({"ok": True, "ignored": "same_text_same_module"})
 

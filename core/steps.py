@@ -65,11 +65,10 @@ MODULES = [
     },
 ]
 
-# SEGUNDA PREGUNTA del módulo 2 (ilícitas)
+# SEGUNDA PREGUNTA del módulo 2 (ilícitas) — breve, sin ejemplos, en una sola vez
 PROMPT_ILICITAS_M2 = (
-    "¿Consumís *sustancias ilícitas* (p. ej. cannabis/porro/faso, cocaína, MDMA/éxtasis, "
-    "ketamina, LSD, paco, hongos/psilocibina, tusi, etc.)?\n"
-    "Si sí, contá *cuál*, *frecuencia/cantidad* y *cuándo fue la última vez*."
+    "¿Consumís sustancias ilícitas?\n"
+    "Si sí, contá *cuál*, *con qué frecuencia* y *cuándo fue la última vez*."
 )
 
 # =================== Helpers de estado y merge ===================
@@ -171,7 +170,7 @@ def advance_module(state: Any) -> Tuple[Optional[int], Optional[str]]:
 
 # ================== Regex & parsers Módulo 0 ==================
 _RE_FLAGS = re.IGNORECASE | re.MULTILINE
-_RE_NOMBRE = re.compile(r"^nombre y apellido:\s*([A-Za-zÁÉÍÓÚÜÑñ'´`\- ]{3,}(?:\s+[A-Za-zÁÉÍÓÚÜÑñ'´`\- ]{2,})+)\s*$", _RE_FLAGS)
+_RE_NOMBRE = re.compile(r"^nombre y apellido:\s*([A-Za-zÁÉÍÓÚÜÑñ'´`\- ]{3,}(?:\s+[A-Za-zÁÉÍÓÚÜÑñ'´`\- ]{1,})+)\s*$", _RE_FLAGS)
 _RE_DNI_LABELED = re.compile(r"^dni.*?:\s*([0-9][0-9.\s]{5,})$", _RE_FLAGS)
 _RE_FNAC = re.compile(r"^fecha nacimiento.*?:\s*(\d{1,2}/\d{1,2}/\d{4})$", _RE_FLAGS)
 _RE_PESO = re.compile(r"^peso.*?kg.*?:\s*([0-9]{1,3}(?:[.,][0-9]{1,2})?)$", _RE_FLAGS)
@@ -179,6 +178,9 @@ _RE_TALLA = re.compile(r"^talla.*?:\s*([0-9]{1,3}(?:[.,][0-9]{1,2})?)$", _RE_FLA
 _RE_OS = re.compile(r"^obra social:\s*([A-Za-zÁÉÍÓÚÜÑñ0-9 .,'\-]{2,60})$", _RE_FLAGS)
 _RE_AFIL = re.compile(r"^(?:n°|nº|num(?:ero)?)[\s_-]*afiliad[oa]:\s*([A-Za-z0-9\-./]{3,30})$", _RE_FLAGS)
 _RE_MOTIVO = re.compile(r"^motivo.*?:\s*(.{3,200})$", _RE_FLAGS)
+
+# Fallback nombre en primera línea (si parece nombre y no obra social)
+_NAME_FIRSTLINE = re.compile(r"^\s*([A-Za-zÁÉÍÓÚÜÑñ'´`\-]{2,}(?:\s+[A-Za-zÁÉÍÓÚÜÑñ'´`\-]{1,}){1,3})\s*$", re.MULTILINE)
 
 _GREETING_RE = re.compile(r"^\s*(hola|buenas|hey|hi|qué\s*tal|buen\s*d[ií]a|buenas\s*tardes|buenas\s*noches)\b", re.IGNORECASE)
 _DNI_FREE_RE = re.compile(r"\b(?P<dni>\d{6,10})\b")
@@ -190,6 +192,22 @@ _HEIGHT_FREE_M_RE = re.compile(r"\b(?P<metros>1(?:[.,]\d{1,2})|0[.,]\d{1,2})\s*m
 _OS_FREE_RE = re.compile(r"(?:obra\s+social|prepaga|cobertura)\s*:?\s*[- ]*(?P<os>[A-Za-zÀ-ÿ0-9\. '\-]{2,})", re.IGNORECASE)
 _AFIL_FREE_RE = re.compile(r"(?:nro?\.?\s*afiliad[oa]|afiliad[oa])\s*:?\s*[- ]*(?P<afil>[A-Za-z0-9\-\.\/]{3,})", re.IGNORECASE)
 _MOTIVO_FREE_RE = re.compile(r"(?:motivo|cirug[ií]a|procedimiento)\s*:?\s*[- ]*(?P<motivo>[\wÀ-ÿ0-9,\. '\-]{3,})", re.IGNORECASE)
+
+# Proveedores de salud (AR) para distinguir de nombres
+_OS_AR = [
+    "pami","osde","swiss medical","swiss","ioma","galeno","medife","omint","medicus","sancor salud","accord",
+    "federada","union personal","upcn","osecac","ospe","obsba","iosfa","iosep","osuthgra","osprera",
+    "jerárquicos","jerarquicos","prevención salud","prevencion salud","apres","apsot","daspu","italiano",
+    "hospital italiano","británico","britanico","santa fe","sancor","accord salud"
+]
+def _looks_like_os_ar(s: str) -> Optional[str]:
+    t = (s or "").strip().lower()
+    if not t:
+        return None
+    for osn in _OS_AR:
+        if osn in t:
+            return osn  # devolver forma en minúsculas; se muestra tal cual escribe el paciente
+    return None
 
 # ===== Limpieza de formato WhatsApp =====
 def _strip_whatsapp_markup(s: str) -> str:
@@ -251,7 +269,7 @@ def _parse_date_words(s: str) -> Optional[str]:
     if not m: return None
     try:
         d = int(m.group("d")); mname = m.group("m").lower(); y = int(m.group("y"))
-        mm = _MONTHS.get(mname);  # type: ignore
+        mm = _MONTHS.get(mname)  # type: ignore
         if not mm: return None
         return f"{d:02d}/{mm:02d}/{y:04d}"
     except Exception:
@@ -293,8 +311,6 @@ def normalize_motivo_clinico_heuristic(raw: Optional[str]) -> Optional[str]:
         (r"catarat", "facoemulsificación de catarata"),
         (r"rinoplast|nariz", "rinoplastia"),
         (r"quiste", "quistectomía"),
-        (r"mama.*(tumor|n[óo]dulo)", "tumorectomía de mama"),
-        (r"mastect", "mastectomía"),
     ]
     for pat, term in rules:
         if re.search(pat, s):
@@ -316,15 +332,23 @@ def _parse_generales(text: str) -> Dict[str, Any]:
     afiliado = (_RE_AFIL.search(text) or [None, None])[1]
     motivo = (_RE_MOTIVO.search(text) or [None, None])[1]
 
+    # Fallbacks libres
     if not nombre:
         m = _NAME_FREE_RE.search(text)
         if m:
             tmp = " ".join(m.group("nombre").split())
             tmp = re.sub(r"^\s*y\s+apellido\s*:\s*", "", tmp, flags=re.IGNORECASE)
             nombre = tmp
+        else:
+            # Si la 1ª línea parece nombre y NO es una obra social conocida, tomarla como nombre
+            m2 = _NAME_FIRSTLINE.match(text.strip().splitlines()[0]) if text.strip().splitlines() else None
+            if m2 and not _looks_like_os_ar(m2.group(1)):
+                nombre = m2.group(1)
+
     if not dni_raw:
         m = _DNI_FREE_RE.search(text)
         if m: dni_raw = m.group("dni")
+
     if not fnac:
         m = _DOB_FREE_RE.search(text)
         if m:
@@ -332,9 +356,11 @@ def _parse_generales(text: str) -> Dict[str, Any]:
             fnac = f"{d:02d}/{mth:02d}/{y:04d}"
         if not fnac:
             fnac = _parse_date_words(text)
+
     if not peso_s:
         m = _WEIGHT_FREE_RE.search(text)
         if m: peso_s = m.group("peso")
+
     if not talla_s:
         m = _HEIGHT_FREE_CM_RE.search(text)
         if m:
@@ -347,25 +373,38 @@ def _parse_generales(text: str) -> Dict[str, Any]:
                     talla_s = str(metros)
                 except Exception:
                     pass
+
     if not os_:
+        # 1) Etiqueta libre
         m = _OS_FREE_RE.search(text)
-        if m: os_ = m.group("os").strip()
+        if m:
+            os_ = m.group("os").strip()
+        # 2) Búsqueda de obras sociales AR conocidas en todo el texto
+        if not os_:
+            for line in text.splitlines():
+                cand = _looks_like_os_ar(line)
+                if cand:
+                    os_ = line.strip()
+                    break
+
     if not afiliado:
         m = _AFIL_FREE_RE.search(text)
         if m: afiliado = m.group("afil").strip()
 
-    # Fallback: "obra social + afiliado" en una misma línea (p.ej., "pami 7372627/01")
+    # Fallback: "OS + afiliado" en MISMA línea (no cruce de renglón) y solo si OS parece real de AR
     if not os_ or not afiliado:
-        _OS_AFIL_LINE_RE = re.compile(
-            r"^\s*(?P<os>[A-Za-zÁÉÍÓÚÜÑñ][A-Za-zÁÉÍÓÚÜÑñ .'\-]{1,})\s+(?P<afil>[A-Za-z0-9\-./]{3,30})\s*$",
+        _OS_AFIL_SAMELINE = re.compile(
+            r"^\s*(?P<os>[A-Za-zÁÉÍÓÚÜÑñ][A-Za-zÁÉÍÓÚÜÑñ .'\-]{1,})[ \t]+(?P<afil>[A-Za-z0-9\-./]{3,30})\s*$",
             _RE_FLAGS
         )
-        m = _OS_AFIL_LINE_RE.search(text)
-        if m:
-            if not os_:
-                os_ = m.group("os").strip()
-            if not afiliado:
-                afiliado = m.group("afil").strip()
+        for line in text.splitlines():
+            m = _OS_AFIL_SAMELINE.match(line)
+            if m and _looks_like_os_ar(m.group('os')):
+                if not os_:
+                    os_ = m.group("os").strip()
+                if not afiliado:
+                    afiliado = m.group("afil").strip()
+                break
 
     if not motivo:
         m = _MOTIVO_FREE_RE.search(text)
@@ -405,6 +444,10 @@ def _parse_generales(text: str) -> Dict[str, Any]:
             talla = None
 
     os_val = (os_ or "").strip(" -:") or None
+    if os_val and not _looks_like_os_ar(os_val) and not _RE_OS.search(text):
+        # Si no parece OS real y no vino con etiqueta, evitá guardarlo
+        os_val = None
+
     afiliado_val = (afiliado or "").strip() or None
     motivo_val = (motivo or "").strip()[:200] if motivo else None
 
@@ -419,9 +462,7 @@ def _parse_generales(text: str) -> Dict[str, Any]:
 
     datos: Dict[str, Any] = {}
     if nombre:
-        nombre_cap = _smart_name_capitalize(nombre)
-        if not re.fullmatch(r"y\s+apellido\s*:?", nombre_cap, flags=re.IGNORECASE):
-            datos["nombre_completo"] = nombre_cap
+        datos["nombre_completo"] = _smart_name_capitalize(nombre)
     if fnac_std: datos["fecha_nacimiento"] = fnac_std
     if edad is not None: datos["edad"] = edad
     datos["fecha_evaluacion"] = feval_std
@@ -739,7 +780,7 @@ def _llm_extract_ilicitas(text: str) -> Dict[str, Any]:
         "Extraé consumo de *sustancias ilícitas*. Devolvé SOLO JSON:\n"
         '{"consume": bool, "items": [{"sustancia": str, "frecuencia": str|null, "ultimo_consumo": str|null}]}\n'
         "Si el paciente niega (“no consumo drogas/porro/etc.”), poné consume=false e items=[]. "
-        "No inventes datos."
+        "No inventes datos ni repreguntes."
     )
     user = f"Texto del paciente:\n{text}"
     raw = _call_openai([{"role":"system","content":system},{"role":"user","content":user}], max_tokens=300)
@@ -772,7 +813,6 @@ def llm_parse_modular(text: str, module_idx: int, state: Any = None) -> Dict[str
         candidate = (m.group(1).strip() if m else None)
 
         if candidate:
-            # best-effort mapping a término clínico (SNOMED-like)
             system = (
                 "Estandarizá un motivo quirúrgico en español a un término clínico claro. "
                 "Devolvé SOLO JSON: {\"term_es\": str, \"confidence\": number}."
@@ -858,7 +898,8 @@ def summarize_patch_for_confirmation(patch: Dict[str, Any], module_idx: int) -> 
             parts = []
             if _fmt(os_): parts.append(f"Obra social: {os_}")
             if _fmt(afil): parts.append(f"Afiliado: {afil}")
-            lines.append("• " + " — ".join(parts))
+            if parts:
+                lines.append("• " + " — ".join(parts))
         if _fmt(motivo):
             lines.append(f"• Motivo: {motivo}")
 
