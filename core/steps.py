@@ -746,33 +746,44 @@ def _llm_extract_medicacion(text: str) -> Dict[str, Any]:
     """
     if not (text or "").strip():
         return {}
+
     system = (
-        "Sos un normalizador de medicación. A partir de un texto en español con medicación habitual, "
-        "devolvé SOLO JSON con este esquema: "
+        "Sos un normalizador de medicación en *Argentina*. "
+        "A partir de un texto en español con medicación habitual, devolvé SOLO JSON con este esquema: "
         '{"meds":[{"droga": str, "dosis": str|null, "frecuencia": str|null}]} '
-        "Aceptá nombres comerciales (mapear al principio activo cuando sea posible) y también inhaladores/puff. "
-        "Si no hay medicación, usá meds=[]. No inventes dosis."
+        "Reglas:\n"
+        "- Usá la denominación en Argentina (ejemplo: Paxon = losartán, no paroxetina).\n"
+        "- Aceptá nombres comerciales o genéricos y devolvé siempre el principio activo usado en Argentina.\n"
+        "- Incluir puff/inhaladores si se mencionan.\n"
+        "- Si no hay medicación, usá meds=[].\n"
+        "- No inventes dosis ni frecuencia; solo usá lo que el paciente escribió."
     )
     user = f"Texto del paciente:\n{text}"
+
     raw = _call_openai(
         messages=[{"role": "system", "content": system},
                   {"role": "user", "content": user}],
-        max_tokens=300
+        max_tokens=320
     )
     try:
         obj = json.loads(raw) if raw else {}
     except Exception:
         obj = {}
+
     meds_in = obj.get("meds") or []
     meds_out = []
     for it in meds_in:
-        if not isinstance(it, dict): continue
+        if not isinstance(it, dict):
+            continue
         d = (it.get("droga") or "").strip()
-        if not d: continue
+        if not d:
+            continue
         dosis = (it.get("dosis") or None)
         frec = (it.get("frecuencia") or None)
         meds_out.append({"droga": d, "dosis": dosis, "frecuencia": frec})
+
     return {"ficha": {"alergia_medicacion": {"medicacion_habitual": meds_out}}}
+
 
 # ============================================================================
 # LLM: normalización por módulo
